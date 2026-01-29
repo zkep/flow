@@ -1,35 +1,35 @@
-# Flow - Workflow Orchestration Library
+# Flow - 工作流编排库
 
-🌍 **Language Switch**: [中文文档](README-zh.md)
+🌍 **语言切换**：[English](README.md)
 
-Flow is a Go library for building and executing workflows, providing two execution modes: linear execution chain (Chain) and graphical executor (Graph).
+Flow 是一个用于构建和执行工作流的 Go 库，提供两种执行模式：线性执行链（Chain）和图形化执行器（Graph）。
 
-## Overview
+## 功能概述
 
-### Chain - Linear Execution Chain
-Provides simple sequential execution pattern, suitable for pipelined data processing:
-- Chained function calls
-- Value passing history tracking
-- Deferred task execution
-- Step naming and history backtracking
+### Chain - 线性执行链
+提供简单的顺序执行模式，适合管道式数据处理：
+- 链式函数调用
+- 值传递历史记录
+- 延迟任务执行
+- 步骤命名和历史回溯
 
-### Graph - Graphical Executor
-Provides complex workflow orchestration capabilities with support for Directed Acyclic Graphs (DAG):
-- Multiple node types (Start, End, Branch, Parallel, Loop)
-- Conditional execution paths
-- Sequential and parallel execution strategies
-- Cyclic dependency detection
-- Visual output (Graphviz and Mermaid)
+### Graph - 图形化执行器
+提供复杂的工作流编排能力，支持有向无环图(DAG)：
+- 多种节点类型（Start、End、Branch、Parallel、Loop）
+- 条件执行路径
+- 顺序和并行执行策略
+- 循环依赖检测
+- 可视化输出（Graphviz 和 Mermaid）
 
-## Installation
+## 安装
 
 ```bash
 go get -u github.com/zkep/flow
 ```
 
-## Usage Examples
+## 使用示例
 
-### Chain Example
+### Chain 示例
 
 ```go
 package main
@@ -40,17 +40,17 @@ import (
 )
 
 func main() {
-    result := flow.NewChain(10).
-        Call(func(x int) int { return x * 2 }).
-        Call(func(x int) int { return x + 5 }).
-        Call(func(x int) string { return fmt.Sprintf("Result: %d", x) }).
-        Value()
-
-    fmt.Println(result) // Output: Result: 25
+    result := flow.NewChain(10)
+        .Call(func(x int) int { return x * 2 })
+        .Call(func(x int) int { return x + 5 })
+        .Call(func(x int) string { return fmt.Sprintf("Result: %d", x) })
+        .Value()
+    
+    fmt.Println(result) // 输出: Result: 25
 }
 ```
 
-### Chain with Values Example
+### Chain 多值示例
 
 ```go
 package main
@@ -61,30 +61,30 @@ import (
 )
 
 func main() {
-    // Multiple inputs and multiple outputs
+    // 多个输入和多个输出
     c := flow.NewChain(10, 20).
         Call(func(a, b int) (int, int) {
             return a + b, a * b
         })
 
-    // Get all current values
+    // 获取所有当前值
     values := c.Values()
-    fmt.Printf("All values: %v\n", values) // Output: All values: [30 200]
+    fmt.Printf("所有值：%v\n", values) // 输出: 所有值：[30 200]
     
-    // Get first value (same as Value())
+    // 获取第一个值（与 Value() 相同）
     firstValue := c.Value()
-    fmt.Printf("First value: %v\n", firstValue) // Output: First value: 30
+    fmt.Printf("第一个值：%v\n", firstValue) // 输出: 第一个值：30
     
-    // Continue the chain with all values
+    // 继续使用所有值
     c = c.Call(func(a, b int) string {
-        return fmt.Sprintf("Sum: %d, Product: %d", a, b)
+        return fmt.Sprintf("和：%d, 积：%d", a, b)
     })
     
-    fmt.Printf("Final result: %v\n", c.Value()) // Output: Final result: Sum: 30, Product: 200
+    fmt.Printf("最终结果：%v\n", c.Value()) // 输出: 最终结果：和：30, 积：200
 }
 ```
 
-### Chain with Defer and Run Example
+### Chain 延迟和运行示例
 
 ```go
 package main
@@ -106,21 +106,21 @@ func main() {
             product = a * b * c
         }).
         Call(func(a, b, c int) int {
-            return (a + b + c) / 3 // Calculate average
+            return (a + b + c) / 3 // 计算平均值
         })
     
-    // Execute all deferred tasks
+    // 执行所有延迟任务
     err := result.Run()
     if err != nil {
         panic(err)
     }
     
-    fmt.Printf("Sum: %d, Product: %d, Average: %d\n", sum, product, result.Value())
-    // Output: Sum: 6, Product: 6, Average: 2
+    fmt.Printf("和：%d, 积：%d, 平均值：%d\n", sum, product, result.Value())
+    // 输出: 和：6, 积：6, 平均值：2
 }
 ```
 
-### Complex Chain with Defer, Call and Use
+### 复杂 Chain 示例（包含 Defer、Call 和 Use）
 
 ```go
 package main
@@ -135,15 +135,15 @@ func main() {
     var intermediateResults []int
     var finalReport string
     
-    // Process pipeline: Data -> Validation -> Transformation -> Analysis -> Report
+    // 处理流程：数据 -> 验证 -> 转换 -> 分析 -> 报告
     result := flow.NewChain(10, 20, 30, 40, 50).
         Name("raw_data").
         Defer(func(data ...int) {
-            // Defer 1: Capture initial data for audit
-            fmt.Printf("Audit: Initial data received with %d items\n", len(data))
+            // 延迟任务 1：捕获初始数据用于审计
+            fmt.Printf("审计：收到初始数据 %d 项\n", len(data))
         }).
         Call(func(data ...int) []int {
-            // Step 1: Validate data
+            // 步骤 1：验证数据
             var valid []int
             for _, v := range data {
                 if v > 0 {
@@ -195,38 +195,38 @@ func main() {
         }).
         Name("analyzed").
         Defer(func(min, max int, avg float64) {
-            finalReport = fmt.Sprintf("Analysis Report - Min: %d, Max: %d, Avg: %.2f", min, max, avg)
+            finalReport = fmt.Sprintf("分析报告 - 最小值：%d, 最大值：%d, 平均值：%.2f", min, max, avg)
         }).
         Use("raw_data", "validated").
         Call(func(rawData []int, validatedData []int) float64 {
-            // Calculate retention rate after validation
+            // 计算验证后的保留率
             return float64(len(validatedData)) / float64(len(rawData)) * 100
         })
 
-    // Execute all deferred tasks
+    // 执行所有延迟任务
     err := result.Run()
     if err != nil {
         panic(err)
     }
     
-    // Generate final output
+    // 生成最终输出
     fmt.Println("=" + strings.Repeat("-", 50) + "=")
     fmt.Println(finalReport)
-    fmt.Printf("Validation Retention Rate: %d\n", int(result.Value()))
-    fmt.Printf("Intermediate Results (Valid Count, Transform Sum): %v\n", intermediateResults)
+    fmt.Printf("验证保留率：%.2f%%\n", result.Value())
+    fmt.Printf("中间结果（有效计数, 转换和）：%v\n", intermediateResults)
     fmt.Println("=" + strings.Repeat("-", 50) + "=")
     
-    // Output:
-    // Audit: Initial data received with 5 items
+    // 输出：
+    // 审计：收到初始数据 5 项
     // =--------------------------------------------------=
-    // Analysis Report - Min: 1, Max: 5, Avg: 3.00
-    // Validation Retention Rate: 100.00%
-    // Intermediate Results (Valid Count, Transform Sum): [5 15]
+    // 分析报告 - 最小值：1, 最大值：5, 平均值：3.00
+    // 验证保留率：100.00%
+    // 中间结果（有效计数, 转换和）：[5 15]
     // =--------------------------------------------------=
 }
 ```
 
-### Chain with Use and Name Example
+### Chain Use 和 Name 示例
 
 ```go
 package main
@@ -243,14 +243,14 @@ func main() {
         Name("doubled").
         Call(func(x int) int { return x + 5 }).
         Name("added").
-        Use("initial_value", 1). // Use initial value (10) and doubled value (20)
+        Use("initial_value", 1). // 使用初始值 (10) 和翻倍后的值 (20)
         Call(func(a, b int) int { return a + b })
 
-    fmt.Printf("Result: %d\n", result.Value()) // Output: Result: 30
+    fmt.Printf("结果：%d\n", result.Value()) // 输出: 结果：30
 }
 ```
 
-### Graph Example
+### Graph 示例
 
 ```go
 package main
@@ -263,18 +263,18 @@ import (
 func main() {
     g := flow.NewGraph()
     
-    // Add nodes
+    // 添加节点
     g.StartNode("start", func() int { return 10 })
 	g.AddNode("double", func(x int) int { return x * 2 }, flow.NodeTypeNormal)
 	g.AddNode("add5", func(x int) int { return x + 5 }, flow.NodeTypeNormal)     
     g.EndNode("end", func(x int) { fmt.Println("Result:", x) })
     
-    // Add edges
+    // 添加边
     g.AddEdge("start", "double")
     g.AddEdge("double", "add5")
     g.AddEdge("add5", "end")
     
-    // Execute
+    // 执行
     err := g.Run()
     if err != nil {
         panic(err)
@@ -282,7 +282,7 @@ func main() {
 }
 ```
 
-### Conditional Execution Example
+### 条件执行示例
 
 ```go
 g := flow.NewGraph()
@@ -292,7 +292,7 @@ g.AddNode("processA", func(x int) int { return x * 2 })
 g.AddNode("processB", func(x int) int { return x + 10 })
 g.EndNode("output", func(x int) { fmt.Println(x) })
 
-// Conditional edges: execute processA if input > 40, otherwise execute processB
+// 条件边：当输入 > 40 时执行 processA，否则执行 processB
 g.AddEdgeWithCondition("input", "processA", func(x int) bool { return x > 40 })
 g.AddEdgeWithCondition("input", "processB", func(x int) bool { return x <= 40 })
 
@@ -302,49 +302,49 @@ g.AddEdge("processB", "output")
 g.Run()
 ```
 
-## API Documentation
+## API 文档
 
-### Chain Type
+### Chain 类型
 
 ```go
-// Create a new execution chain
+// 创建新的执行链
 func NewChain(initial ...any) *Chain
 
-// Call a function and pass current values
+// 调用函数并传递当前值
 func (c *Chain) Call(fn any) *Chain
 
-// Defer task execution
+// 延迟执行任务
 func (c *Chain) Defer(fn any) *Chain
 
-// Execute all deferred tasks
+// 执行所有延迟任务
 func (c *Chain) Run() error
 
-// Get current values list
+// 获取当前值列表
 func (c *Chain) Values() []any
 
-// Get first value
+// 获取第一个值
 func (c *Chain) Value() any
 
-// Get error
+// 获取错误
 func (c *Chain) Error() error
 
-// Get execution history
+// 获取执行历史
 func (c *Chain) History() [][]any
 
-// Name current step
+// 为当前步骤命名
 func (c *Chain) Name(name string) *Chain
 
-// Use values from historical steps
+// 使用历史步骤的值
 func (c *Chain) Use(steps ...any) *Chain
 ```
 
-### Graph Type
+### Graph 类型
 
 ```go
-// Create a new graph executor
+// 创建新的图执行器
 func NewGraph() *Graph
 
-// Add nodes
+// 添加节点
 func (g *Graph) AddNode(name string, fn any, nodeType NodeType) *Graph
 func (g *Graph) StartNode(name string, fn any) *Graph
 func (g *Graph) EndNode(name string, fn any) *Graph
@@ -352,53 +352,53 @@ func (g *Graph) BranchNode(name string, fn any) *Graph
 func (g *Graph) ParallelNode(name string, fn any) *Graph
 func (g *Graph) LoopNode(name string, fn any) *Graph
 
-// Add edges
+// 添加边
 func (g *Graph) AddEdge(from, to string) *Graph
 func (g *Graph) AddEdgeWithCondition(from, to string, cond any) *Graph
 
-// Execution strategies
+// 执行策略
 func (g *Graph) Run() error
 func (g *Graph) RunSequential() error
 func (g *Graph) RunParallel() error
 
-// Node status
+// 节点状态
 func (g *Graph) NodeStatus(name string) NodeStatus
 func (g *Graph) NodeResult(name string) []any
 func (g *Graph) NodeError(name string) error
 
-// Visualization
-func (g *Graph) String() string      // Graphviz format
-func (g *Graph) Mermaid() string     // Mermaid format
+// 可视化
+func (g *Graph) String() string      // Graphviz 格式
+func (g *Graph) Mermaid() string     // Mermaid 格式
 ```
 
-## Node Types
+## 节点类型
 
 ```go
 type NodeType int
 
 const (
-    NodeTypeNormal   NodeType = iota  // Normal node
-    NodeTypeStart                     // Start node
-    NodeTypeEnd                       // End node
-    NodeTypeBranch                    // Branch node
-    NodeTypeParallel                  // Parallel node
-    NodeTypeLoop                      // Loop node
+    NodeTypeNormal   NodeType = iota  // 普通节点
+    NodeTypeStart                     // 起始节点
+    NodeTypeEnd                       // 结束节点
+    NodeTypeBranch                    // 分支节点
+    NodeTypeParallel                  // 并行节点
+    NodeTypeLoop                      // 循环节点
 )
 ```
 
-## Execution Status
+## 执行状态
 
 ```go
 type NodeStatus int
 
 const (
-    NodeStatusPending   NodeStatus = iota  // Pending
-    NodeStatusRunning                     // Running
-    NodeStatusCompleted                   // Completed
-    NodeStatusFailed                      // Failed
+    NodeStatusPending   NodeStatus = iota  // 待执行
+    NodeStatusRunning                     // 执行中
+    NodeStatusCompleted                   // 已完成
+    NodeStatusFailed                      // 执行失败
 )
 ```
 
-## License
+## 许可证
 
 MIT License
