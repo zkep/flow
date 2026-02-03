@@ -2,34 +2,29 @@
 
 🌍 **Language Switch**: [中文文档](README-zh.md)
 
-Flow is a Go library for building and executing workflows, providing two execution modes: linear execution chain (Chain) and graphical executor (Graph).
+Flow is a powerful Go library for building and executing workflows, providing two execution modes: linear execution chain (Chain) and graphical executor (Graph).
 
-## Overview
+## Features
 
-### Chain - Linear Execution Chain
-Provides simple sequential execution pattern, suitable for pipelined data processing:
-- Chained function calls
-- Value passing history tracking
-- Deferred task execution
-- Step naming and history backtracking
-
-### Graph - Graphical Executor
-Provides complex workflow orchestration capabilities with support for Directed Acyclic Graphs (DAG):
-- Multiple node types (Start, End, Branch, Parallel, Loop)
-- Conditional execution paths
-- Sequential and parallel execution strategies
-- Cyclic dependency detection
-- Visual output (Graphviz and Mermaid)
+- **Linear Workflows (Chain)**: Execute tasks in a sequential manner with automatic parameter passing
+- **Graphical Workflows (Graph)**: Build complex workflows with nodes and edges, supporting different node types
+- **Multiple Node Types**: Support for start, end, branch, parallel, and loop nodes
+- **Conditional Execution**: Add conditions to edges for controlled workflow paths
+- **Parallel Execution**: Execute independent nodes concurrently for improved performance
+- **Automatic Parameter Handling**: Smart parameter passing and type conversion between tasks
+- **Error Handling**: Comprehensive error propagation and handling
+- **Visualization Support**: Generate Mermaid and Graphviz diagrams for workflow visualization
+- **Flexible Execution Strategies**: Choose between sequential and parallel execution
 
 ## Installation
 
 ```bash
-go get -u github.com/zkep/flow
+go get github.com/zkep/flow
 ```
 
-## Usage Examples
+## Quick Start
 
-### Chain Example
+### Basic Chain Example
 
 ```go
 package main
@@ -40,17 +35,41 @@ import (
 )
 
 func main() {
-    result := flow.NewChain(10).
-        Call(func(x int) int { return x * 2 }).
-        Call(func(x int) int { return x + 5 }).
-        Call(func(x int) string { return fmt.Sprintf("Result: %d", x) }).
-        Value()
+    chain := flow.NewChain()
 
-    fmt.Println(result) // Output: Result: 25
+    chain.Add("step1", func() int {
+        return 10
+    })
+
+    chain.Add("step2", func(x int) int {
+        return x * 2
+    })
+
+    chain.Add("step3", func(y int) int {
+        return y + 5
+    })
+
+    err := chain.Run()
+    if err != nil {
+        fmt.Printf("Error: %v\n", err)
+        return
+    }
+
+    result, err := chain.Value("step3")
+    if err != nil {
+        fmt.Printf("Error: %v\n", err)
+        return
+    }
+
+    fmt.Printf("Final Result: %v\n", result) // Output: 25
 }
 ```
 
-### Chain with Values Example
+### Using Existing Steps with `Use`
+
+The `Use` method allows you to create a new chain by selecting specific steps from an existing chain. This is particularly useful when you want to reuse certain steps from a previously executed chain or create a subset of steps for further processing.
+
+#### Example: Creating a Subset of Steps
 
 ```go
 package main
@@ -61,196 +80,76 @@ import (
 )
 
 func main() {
-    // Multiple inputs and multiple outputs
-    c := flow.NewChain(10, 20).
-        Call(func(a, b int) (int, int) {
-            return a + b, a * b
-        })
-
-    // Get all current values
-    values := c.Values()
-    fmt.Printf("All values: %v\n", values) // Output: All values: [30 200]
+    // Create and run a full chain
+    originalChain := flow.NewChain()
     
-    // Get first value (same as Value())
-    firstValue := c.Value()
-    fmt.Printf("First value: %v\n", firstValue) // Output: First value: 30
-    
-    // Continue the chain with all values
-    c = c.Call(func(a, b int) string {
-        return fmt.Sprintf("Sum: %d, Product: %d", a, b)
+    originalChain.Add("loadData", func() []int {
+        return []int{1, 2, 3, 4, 5}
     })
     
-    fmt.Printf("Final result: %v\n", c.Value()) // Output: Final result: Sum: 30, Product: 200
-}
-```
-
-### Chain with Defer and Run Example
-
-```go
-package main
-
-import (
-    "fmt"
-    "github.com/zkep/flow"
-)
-
-func main() {
-    var sum int
-    var product int
+    originalChain.Add("filterData", func(data []int) []int {
+        var filtered []int
+        for _, num := range data {
+            if num > 2 {
+                filtered = append(filtered, num)
+            }
+        }
+        return filtered
+    })
     
-    result := flow.NewChain(1, 2, 3).
-        Defer(func(a, b, c int) {
-            sum = a + b + c
-        }).
-        Defer(func(a, b, c int) {
-            product = a * b * c
-        }).
-        Call(func(a, b, c int) int {
-            return (a + b + c) / 3 // Calculate average
-        })
+    originalChain.Add("processData", func(data []int) []int {
+        var processed []int
+        for _, num := range data {
+            processed = append(processed, num*2)
+        }
+        return processed
+    })
     
-    // Execute all deferred tasks
-    err := result.Run()
+    originalChain.Add("saveData", func(data []int) error {
+        fmt.Printf("Saving data: %v\n", data)
+        return nil
+    })
+    
+    fmt.Println("Running original chain:")
+    err := originalChain.Run()
     if err != nil {
-        panic(err)
+        fmt.Printf("Error: %v\n", err)
+        return
     }
     
-    fmt.Printf("Sum: %d, Product: %d, Average: %d\n", sum, product, result.Value())
-    // Output: Sum: 6, Product: 6, Average: 2
-}
-```
-
-### Complex Chain with Defer, Call and Use
-
-```go
-package main
-
-import (
-    "fmt"
-    "strings"
-    "github.com/zkep/flow"
-)
-
-func main() {
-    var intermediateResults []int
-    var finalReport string
+    // Create a new chain using only specific steps
+    // This allows us to reuse the data loading and processing steps
+    fmt.Println("\nRunning subset chain:")
+    subsetChain := originalChain.Use("loadData", "processData")
     
-    // Process pipeline: Data -> Validation -> Transformation -> Analysis -> Report
-    result := flow.NewChain(10, 20, 30, 40, 50).
-        Name("raw_data").
-        Defer(func(data ...int) {
-            // Defer 1: Capture initial data for audit
-            fmt.Printf("Audit: Initial data received with %d items\n", len(data))
-        }).
-        Call(func(data ...int) []int {
-            // Step 1: Validate data
-            var valid []int
-            for _, v := range data {
-                if v > 0 {
-                    valid = append(valid, v)
-                }
-            }
-            return valid
-        }).
-        Name("validated").
-        Defer(func(valid []int) {
-            intermediateResults = append(intermediateResults, len(valid))
-        }).
-        Call(func(data []int) []int {
-            var normalized []int
-            for _, v := range data {
-                normalized = append(normalized, v/10)
-            }
-            return normalized
-        }).
-        Name("transformed").
-        Defer(func(transformed []int) {
-            var sum int
-            for _, v := range transformed {
-                sum += v
-            }
-            intermediateResults = append(intermediateResults, sum)
-        }).
-        Call(func(data []int) (int, int, float64) {
-            if len(data) == 0 {
-                return 0, 0, 0
-            }
-            
-            sum := 0
-            min := data[0]
-            max := data[0]
-            
-            for _, v := range data {
-                sum += v
-                if v < min {
-                    min = v
-                }
-                if v > max {
-                    max = v
-                }
-            }
-            
-            average := float64(sum) / float64(len(data))
-            return min, max, average
-        }).
-        Name("analyzed").
-        Defer(func(min, max int, avg float64) {
-            finalReport = fmt.Sprintf("Analysis Report - Min: %d, Max: %d, Avg: %.2f", min, max, avg)
-        }).
-        Use("raw_data", "validated").
-        Call(func(rawData []int, validatedData []int) float64 {
-            // Calculate retention rate after validation
-            return float64(len(validatedData)) / float64(len(rawData)) * 100
-        })
-
-    // Execute all deferred tasks
-    err := result.Run()
+    err = subsetChain.Run()
     if err != nil {
-        panic(err)
+        fmt.Printf("Error: %v\n", err)
+        return
     }
     
-    // Generate final output
-    fmt.Println("=" + strings.Repeat("-", 50) + "=")
-    fmt.Println(finalReport)
-    fmt.Printf("Validation Retention Rate: %d\n", int(result.Value()))
-    fmt.Printf("Intermediate Results (Valid Count, Transform Sum): %v\n", intermediateResults)
-    fmt.Println("=" + strings.Repeat("-", 50) + "=")
+    // Get results from the subset chain
+    result, err := subsetChain.Value("processData")
+    if err != nil {
+        fmt.Printf("Error: %v\n", err)
+        return
+    }
     
-    // Output:
-    // Audit: Initial data received with 5 items
-    // =--------------------------------------------------=
-    // Analysis Report - Min: 1, Max: 5, Avg: 3.00
-    // Validation Retention Rate: 100.00%
-    // Intermediate Results (Valid Count, Transform Sum): [5 15]
-    // =--------------------------------------------------=
+    fmt.Printf("Subset chain result: %v\n", result) // Output: [2 4 6 8 10]
 }
 ```
 
-### Chain with Use and Name Example
+#### Key Use Cases for `Use`
 
-```go
-package main
+1. **Reusing Steps**: Extract specific steps from a complex chain to reuse them in different contexts
+2. **Partial Processing**: Create a chain that only executes a subset of steps for focused processing
+3. **Step Isolation**: Test individual steps or groups of steps independently
+4. **Dynamic Workflow Construction**: Build new workflows on-the-fly by selecting steps from existing chains
+5. **Performance Optimization**: Avoid re-executing unnecessary steps by creating targeted chains
 
-import (
-    "fmt"
-    "github.com/zkep/flow"
-)
+The `Use` method maintains the original step names and their order, ensuring consistent behavior when creating subsets of steps.
 
-func main() {
-    result := flow.NewChain(10).
-        Name("initial_value").
-        Call(func(x int) int { return x * 2 }).
-        Name("doubled").
-        Call(func(x int) int { return x + 5 }).
-        Name("added").
-        Use("initial_value", 1). // Use initial value (10) and doubled value (20)
-        Call(func(a, b int) int { return a + b })
-
-    fmt.Printf("Result: %d\n", result.Value()) // Output: Result: 30
-}
-```
-
-### Graph Example
+### Basic Graph Example
 
 ```go
 package main
@@ -262,143 +161,532 @@ import (
 
 func main() {
     g := flow.NewGraph()
-    
-    // Add nodes
-    g.StartNode("start", func() int { return 10 })
-	g.AddNode("double", func(x int) int { return x * 2 }, flow.NodeTypeNormal)
-	g.AddNode("add5", func(x int) int { return x + 5 }, flow.NodeTypeNormal)     
-    g.EndNode("end", func(x int) { fmt.Println("Result:", x) })
-    
-    // Add edges
-    g.AddEdge("start", "double")
-    g.AddEdge("double", "add5")
-    g.AddEdge("add5", "end")
-    
-    // Execute
+
+    g.StartNode("start", func() int {
+        fmt.Println("Executing start node")
+        return 10
+    })
+
+    g.Node("process1", func(x int) int {
+        fmt.Printf("Executing process1: %d * 2 = %d\n", x, x*2)
+        return x * 2
+    })
+
+    g.Node("process2", func(x int) int {
+        fmt.Printf("Executing process2: %d + 5 = %d\n", x, x+5)
+        return x + 5
+    })
+
+    g.EndNode("end", func(x int) {
+        fmt.Printf("Executing end node: Final result is %d\n", x)
+    })
+
+    g.AddEdge("start", "process1")
+    g.AddEdge("process1", "process2")
+    g.AddEdge("process2", "end")
+
     err := g.Run()
     if err != nil {
-        panic(err)
+        fmt.Printf("Error: %v\n", err)
+    } else {
+        fmt.Println("Execution completed successfully")
     }
 }
 ```
 
-### Conditional Execution Example
+## Usage
+
+### Chain
+
+The Chain mode allows you to create linear workflows where each step executes in sequence, with the output of one step automatically passed as input to the next.
+
+#### Creating a Chain
 
 ```go
-g := flow.NewGraph()
-
-g.StartNode("input", func() int { return 42 })
-g.AddNode("processA", func(x int) int { return x * 2 })
-g.AddNode("processB", func(x int) int { return x + 10 })
-g.EndNode("output", func(x int) { fmt.Println(x) })
-
-// Conditional edges: execute processA if input > 40, otherwise execute processB
-g.AddEdgeWithCondition("input", "processA", func(x int) bool { return x > 40 })
-g.AddEdgeWithCondition("input", "processB", func(x int) bool { return x <= 40 })
-
-g.AddEdge("processA", "output")
-g.AddEdge("processB", "output")
-
-g.Run()
+chain := flow.NewChain()
 ```
 
-## API Documentation
-
-### Chain Type
+#### Adding Steps
 
 ```go
-// Create a new execution chain
-func NewChain(initial ...any) *Chain
-
-// Call a function and pass current values
-func (c *Chain) Call(fn any) *Chain
-
-// Defer task execution
-func (c *Chain) Defer(fn any) *Chain
-
-// Execute all deferred tasks
-func (c *Chain) Run() error
-
-// Get current values list
-func (c *Chain) Values() []any
-
-// Get first value
-func (c *Chain) Value() any
-
-// Get error
-func (c *Chain) Error() error
-
-// Get execution history
-func (c *Chain) History() [][]any
-
-// Name current step
-func (c *Chain) Name(name string) *Chain
-
-// Use values from historical steps
-func (c *Chain) Use(steps ...any) *Chain
+chain.Add("stepName", func() int {
+    return 42
+})
 ```
 
-### Graph Type
+#### Running the Chain
 
 ```go
-// Create a new graph executor
-func NewGraph() *Graph
+err := chain.Run()
+if err != nil {
+    // Handle error
+}
+```
 
-// Add nodes
-func (g *Graph) AddNode(name string, fn any, nodeType NodeType) *Graph
-func (g *Graph) StartNode(name string, fn any) *Graph
-func (g *Graph) EndNode(name string, fn any) *Graph
-func (g *Graph) BranchNode(name string, fn any) *Graph
-func (g *Graph) ParallelNode(name string, fn any) *Graph
-func (g *Graph) LoopNode(name string, fn any) *Graph
+#### Retrieving Results
 
-// Add edges
-func (g *Graph) AddEdge(from, to string) *Graph
-func (g *Graph) AddEdgeWithCondition(from, to string, cond any) *Graph
+```go
+// Get a single value from a step
+result, err := chain.Value("stepName")
 
-// Execution strategies
-func (g *Graph) Run() error
-func (g *Graph) RunSequential() error
-func (g *Graph) RunParallel() error
+// Get all values from a step
+results, err := chain.Values("stepName")
+```
 
-// Node status
-func (g *Graph) NodeStatus(name string) NodeStatus
-func (g *Graph) NodeResult(name string) []any
-func (g *Graph) NodeError(name string) error
+### Graph
 
-// Visualization
-func (g *Graph) String() string      // Graphviz format
-func (g *Graph) Mermaid() string     // Mermaid format
+The Graph mode allows you to create complex workflows with nodes and edges, supporting different node types and execution strategies.
+
+#### Creating a Graph
+
+```go
+graph := flow.NewGraph()
+```
+
+#### Adding Nodes
+
+```go
+// Start node
+graph.StartNode("start", func() int {
+    return 42
+})
+
+// Normal node
+graph.Node("process", func(x int) int {
+    return x * 2
+})
+
+// End node
+graph.EndNode("end", func(result int) {
+    fmt.Println("Result:", result)
+})
+
+// Branch node
+graph.BranchNode("branch", func(x int) int {
+    if x > 50 {
+        return 1
+    }
+    return 0
+})
+
+// Parallel node
+graph.ParallelNode("parallel", func(x int) int {
+    return x + 10
+})
+
+// Loop node
+graph.LoopNode("loop", func(x int) int {
+    return x - 1
+})
+```
+
+#### Adding Edges
+
+```go
+// Simple edge
+graph.AddEdge("fromNode", "toNode")
+
+// Edge with condition
+graph.AddEdgeWithCondition("fromNode", "toNode", func(x int) bool {
+    return x > 0
+})
+```
+
+#### Running the Graph
+
+```go
+// Run sequentially
+err := graph.Run()
+
+// Run in parallel
+err := graph.RunParallel()
+
+// Run in parallel with context
+ctx := context.Background()
+err := graph.RunParallelWithContext(ctx)
+```
+
+#### Retrieving Node Information
+
+```go
+// Get node status
+status := graph.NodeStatus("nodeName")
+
+// Get node result
+result := graph.NodeResult("nodeName")
+
+// Get node error
+err := graph.NodeError("nodeName")
+```
+
+#### Visualization
+
+```go
+// Generate Mermaid diagram
+mermaid := graph.Mermaid()
+fmt.Println(mermaid)
+
+// Generate Graphviz diagram
+graphviz := graph.String()
+fmt.Println(graphviz)
 ```
 
 ## Node Types
 
-```go
-type NodeType int
+| Node Type | Description |
+|-----------|-------------|
+| Start | The starting point of a workflow |
+| End | The ending point of a workflow |
+| Normal | Standard processing node |
+| Branch | Node for conditional branching |
+| Parallel | Node for parallel processing |
+| Loop | Node for loop operations |
 
-const (
-    NodeTypeNormal   NodeType = iota  // Normal node
-    NodeTypeStart                     // Start node
-    NodeTypeEnd                       // End node
-    NodeTypeBranch                    // Branch node
-    NodeTypeParallel                  // Parallel node
-    NodeTypeLoop                      // Loop node
-)
+## Execution Strategies
+
+- **Sequential Execution**: Nodes are executed one after another in topological order
+- **Parallel Execution**: Independent nodes are executed concurrently for improved performance
+
+## Advanced Features
+
+### Conditional Execution
+
+Use `AddEdgeWithCondition` to add conditions to edges, allowing for dynamic workflow paths based on runtime values.
+
+### Parallel Execution
+
+Use `RunParallel()` or `RunParallelWithContext()` to execute independent nodes concurrently, which can significantly improve performance for workflows with many independent tasks.
+
+### Error Handling
+
+Flow automatically propagates errors through the workflow, stopping execution when an error occurs.
+
+### Parameter Handling
+
+Flow automatically handles parameter passing between nodes, including type conversion when possible.
+
+## Real-World Use Cases
+
+### 1. Data Processing Pipeline
+
+**Scenario**: Processing large datasets with multiple transformation steps
+
+**Implementation**: 
+- Use `Chain` for sequential data processing steps
+- Each step transforms the data and passes it to the next
+- Add error handling at each step to catch data anomalies
+
+**Example**: 
+```go
+chain := flow.NewChain()
+
+chain.Add("loadData", func() []string {
+    // Load data from file/database
+    return []string{"data1", "data2", "data3"}
+})
+
+chain.Add("cleanData", func(data []string) []string {
+    // Clean and validate data
+    var cleaned []string
+    for _, item := range data {
+        if item != "" {
+            cleaned = append(cleaned, strings.TrimSpace(item))
+        }
+    }
+    return cleaned
+})
+
+chain.Add("transformData", func(data []string) []map[string]string {
+    // Transform data into structured format
+    var transformed []map[string]string
+    for _, item := range data {
+        transformed = append(transformed, map[string]string{"value": item})
+    }
+    return transformed
+})
+
+chain.Add("saveData", func(data []map[string]string) error {
+    // Save data to database
+    for _, item := range data {
+        // Save item to database
+        fmt.Printf("Saving: %v\n", item)
+    }
+    return nil
+})
+
+if err := chain.Run(); err != nil {
+    fmt.Printf("Pipeline failed: %v\n", err)
+}
 ```
 
-## Execution Status
+### 2. Business Process Automation
 
+**Scenario**: Automating a customer onboarding process with multiple approval steps
+
+**Implementation**: 
+- Use `Graph` to model complex approval workflows
+- Add conditional edges for approval/rejection paths
+- Use parallel execution for independent verification steps
+
+**Example**: 
 ```go
-type NodeStatus int
+graph := flow.NewGraph()
 
-const (
-    NodeStatusPending   NodeStatus = iota  // Pending
-    NodeStatusRunning                     // Running
-    NodeStatusCompleted                   // Completed
-    NodeStatusFailed                      // Failed
-)
+// Start with customer information
+graph.StartNode("collectInfo", func() map[string]string {
+    return map[string]string{
+        "name": "John Doe",
+        "email": "john@example.com",
+        "score": "85",
+    }
+})
+
+// Credit check
+graph.Node("creditCheck", func(info map[string]string) bool {
+    score, _ := strconv.Atoi(info["score"])
+    return score > 70
+})
+
+// Background verification (parallel)
+graph.ParallelNode("backgroundCheck", func(info map[string]string) bool {
+    // Simulate background check
+    time.Sleep(100 * time.Millisecond)
+    return true
+})
+
+// Document verification (parallel)
+graph.ParallelNode("documentCheck", func(info map[string]string) bool {
+    // Simulate document verification
+    time.Sleep(150 * time.Millisecond)
+    return true
+})
+
+// Approval decision
+graph.BranchNode("approval", func(creditOk, backgroundOk, documentOk bool) string {
+    if creditOk && backgroundOk && documentOk {
+        return "approve"
+    }
+    return "reject"
+})
+
+// Approve path
+graph.Node("sendApproval", func(info map[string]string) {
+    fmt.Printf("Approving customer: %s\n", info["name"])
+})
+
+// Reject path
+graph.Node("sendRejection", func(info map[string]string) {
+    fmt.Printf("Rejecting customer: %s\n", info["name"])
+})
+
+// End nodes
+graph.EndNode("onboardingComplete", func() {
+    fmt.Println("Customer onboarding completed successfully")
+})
+
+graph.EndNode("onboardingFailed", func() {
+    fmt.Println("Customer onboarding failed")
+})
+
+// Add edges
+graph.AddEdge("collectInfo", "creditCheck")
+graph.AddEdge("collectInfo", "backgroundCheck")
+graph.AddEdge("collectInfo", "documentCheck")
+graph.AddEdge("creditCheck", "approval")
+graph.AddEdge("backgroundCheck", "approval")
+graph.AddEdge("documentCheck", "approval")
+graph.AddEdgeWithCondition("approval", "sendApproval", func(decision string) bool {
+    return decision == "approve"
+})
+graph.AddEdgeWithCondition("approval", "sendRejection", func(decision string) bool {
+    return decision == "reject"
+})
+graph.AddEdge("sendApproval", "onboardingComplete")
+graph.AddEdge("sendRejection", "onboardingFailed")
+
+// Run in parallel for faster execution
+if err := graph.RunParallel(); err != nil {
+    fmt.Printf("Onboarding process failed: %v\n", err)
+}
 ```
+
+### 3. ETL (Extract, Transform, Load) Workflow
+
+**Scenario**: Extracting data from multiple sources, transforming it, and loading it into a data warehouse
+
+**Implementation**: 
+- Use `Graph` with parallel execution for data extraction
+- Use `Chain` for sequential transformation steps
+- Add error handling for data quality issues
+
+**Example**: 
+```go
+graph := flow.NewGraph()
+
+// Extract data from multiple sources in parallel
+graph.ParallelNode("extractFromAPI", func() []map[string]interface{} {
+    // Extract data from API
+    return []map[string]interface{}{
+        {"id": 1, "name": "Product A", "price": 100},
+        {"id": 2, "name": "Product B", "price": 200},
+    }
+})
+
+graph.ParallelNode("extractFromDatabase", func() []map[string]interface{} {
+    // Extract data from database
+    return []map[string]interface{}{
+        {"id": 3, "name": "Product C", "price": 150},
+        {"id": 4, "name": "Product D", "price": 250},
+    }
+})
+
+// Combine extracted data
+graph.Node("combineData", func(apiData, dbData []map[string]interface{}) []map[string]interface{} {
+    combined := append(apiData, dbData...)
+    return combined
+})
+
+// Transform data
+graph.Node("transformData", func(data []map[string]interface{}) []map[string]interface{} {
+    var transformed []map[string]interface{}
+    for _, item := range data {
+        price := item["price"].(int)
+        item["priceWithTax"] = price * 1.2 // Add 20% tax
+        item["category"] = "General"
+        transformed = append(transformed, item)
+    }
+    return transformed
+})
+
+// Load data
+graph.EndNode("loadToWarehouse", func(data []map[string]interface{}) error {
+    fmt.Printf("Loading %d items to data warehouse\n", len(data))
+    // Load data to warehouse
+    for _, item := range data {
+        fmt.Printf("Loading: %v\n", item)
+    }
+    return nil
+})
+
+// Add edges
+graph.AddEdge("extractFromAPI", "combineData")
+graph.AddEdge("extractFromDatabase", "combineData")
+graph.AddEdge("combineData", "transformData")
+graph.AddEdge("transformData", "loadToWarehouse")
+
+// Run in parallel
+if err := graph.RunParallel(); err != nil {
+    fmt.Printf("ETL process failed: %v\n", err)
+}
+```
+
+### 4. Microservice Orchestration
+
+**Scenario**: Coordinating multiple microservices to complete a business transaction
+
+**Implementation**: 
+- Use `Graph` to model microservice interactions
+- Add compensation nodes for error handling
+- Use parallel execution for independent services
+
+**Example**: 
+```go
+graph := flow.NewGraph()
+
+// Start with order information
+graph.StartNode("createOrder", func() map[string]interface{} {
+    return map[string]interface{}{
+        "orderId": "ORD-123",
+        "customerId": "CUST-456",
+        "items": []string{"ITEM-1", "ITEM-2"},
+        "total": 300,
+    }
+})
+
+// Check inventory
+graph.Node("checkInventory", func(order map[string]interface{}) bool {
+    // Check inventory service
+    fmt.Println("Checking inventory...")
+    return true // Inventory available
+})
+
+// Process payment
+graph.Node("processPayment", func(order map[string]interface{}) bool {
+    // Payment service
+    fmt.Println("Processing payment...")
+    return true // Payment successful
+})
+
+// Update inventory (parallel with payment)
+graph.ParallelNode("updateInventory", func(order map[string]interface{}) bool {
+    // Inventory service
+    fmt.Println("Updating inventory...")
+    return true
+})
+
+// Ship order
+graph.Node("shipOrder", func(order map[string]interface{}) string {
+    // Shipping service
+    fmt.Println("Shipping order...")
+    return "SHIP-789"
+})
+
+// Send notification
+graph.EndNode("sendNotification", func(order map[string]interface{}, trackingId string) {
+    // Notification service
+    fmt.Printf("Sending notification for order %s with tracking %s\n", order["orderId"], trackingId)
+})
+
+// Compensation nodes for failures
+graph.Node("cancelPayment", func(order map[string]interface{}) {
+    fmt.Printf("Cancelling payment for order %s\n", order["orderId"])
+})
+
+graph.Node("restoreInventory", func(order map[string]interface{}) {
+    fmt.Printf("Restoring inventory for order %s\n", order["orderId"])
+})
+
+// Add edges
+graph.AddEdge("createOrder", "checkInventory")
+graph.AddEdgeWithCondition("checkInventory", "processPayment", func(available bool) bool {
+    return available
+})
+graph.AddEdgeWithCondition("checkInventory", "restoreInventory", func(available bool) bool {
+    return !available
+})
+graph.AddEdge("checkInventory", "updateInventory")
+graph.AddEdgeWithCondition("processPayment", "shipOrder", func(success bool) bool {
+    return success
+})
+graph.AddEdgeWithCondition("processPayment", "cancelPayment", func(success bool) bool {
+    return !success
+})
+graph.AddEdge("shipOrder", "sendNotification")
+
+// Run with parallel execution for independent services
+if err := graph.RunParallel(); err != nil {
+    fmt.Printf("Order processing failed: %v\n", err)
+}
+```
+
+## Examples
+
+The library includes several examples in the `_examples` directory:
+
+- **Basic Examples**:
+  - `basic-chain`: Basic chain workflow
+  - `basic-graph`: Basic graph workflow
+
+- **Advanced Examples**:
+  - `advanced-chain`: Advanced chain with complex parameter passing
+  - `advanced-graph`: Advanced graph with multiple node types
+  - `combined-flow`: Combining chain and graph workflows
+  - `advanced-processing`: Advanced processing patterns
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-MIT License
+Flow is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

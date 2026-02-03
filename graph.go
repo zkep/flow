@@ -1,10 +1,12 @@
 package flow
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -82,7 +84,7 @@ func NewGraph() *Graph {
 	}
 }
 
-func (g *Graph) AddNode(name string, fn any, nodeType NodeType) *Graph {
+func (g *Graph) addNode(name string, fn any, nodeType NodeType) *Graph {
 	if g.err != nil {
 		return g
 	}
@@ -109,24 +111,28 @@ func (g *Graph) AddNode(name string, fn any, nodeType NodeType) *Graph {
 	return g
 }
 
+func (g *Graph) Node(name string, fn any) *Graph {
+	return g.addNode(name, fn, NodeTypeNormal)
+}
+
 func (g *Graph) StartNode(name string, fn any) *Graph {
-	return g.AddNode(name, fn, NodeTypeStart)
+	return g.addNode(name, fn, NodeTypeStart)
 }
 
 func (g *Graph) EndNode(name string, fn any) *Graph {
-	return g.AddNode(name, fn, NodeTypeEnd)
+	return g.addNode(name, fn, NodeTypeEnd)
 }
 
 func (g *Graph) BranchNode(name string, fn any) *Graph {
-	return g.AddNode(name, fn, NodeTypeBranch)
+	return g.addNode(name, fn, NodeTypeBranch)
 }
 
 func (g *Graph) ParallelNode(name string, fn any) *Graph {
-	return g.AddNode(name, fn, NodeTypeParallel)
+	return g.addNode(name, fn, NodeTypeParallel)
 }
 
 func (g *Graph) LoopNode(name string, fn any) *Graph {
-	return g.AddNode(name, fn, NodeTypeLoop)
+	return g.addNode(name, fn, NodeTypeLoop)
 }
 
 func (g *Graph) AddEdge(from, to string) *Graph {
@@ -214,8 +220,8 @@ func (g *Graph) FindStartNode() string {
 		}
 	}
 
-	for name, inDegree := range g.inDegree {
-		if inDegree == 0 {
+	for name := range g.nodes {
+		if g.inDegree[name] == 0 {
 			return name
 		}
 	}
@@ -316,9 +322,15 @@ func (g *Graph) evaluateCondition(cond any, results []any) bool {
 	// Prepare arguments for condition function
 	if len(results) > 0 {
 		if fnType.IsVariadic() {
-			// Variadic function: pass all results
-			for _, result := range results {
-				args = append(args, reflect.ValueOf(result))
+			// Variadic function: need to handle differently
+			if len(results) > 0 {
+				// Check if we need to convert to variadic type
+				sliceType := fnType.In(argCount - 1).Elem()
+				slice := reflect.MakeSlice(reflect.SliceOf(sliceType), 0, len(results))
+				for _, result := range results {
+					slice = reflect.Append(slice, reflect.ValueOf(result))
+				}
+				args = append(args, slice)
 			}
 		} else if argCount == 1 {
 			// Single parameter function: pass first result (if available)
@@ -395,6 +407,11 @@ func (g *Graph) executeNode(nodeName string, inputs []any) ([]any, error) {
 
 	if fnType.Kind() != reflect.Func {
 		return nil, &ChainError{Message: ErrNotFunction}
+	}
+
+	// Convert nil inputs to empty slice
+	if inputs == nil {
+		inputs = make([]any, 0)
 	}
 
 	args, err := prepareArgs(inputs, fnType)
@@ -485,6 +502,11 @@ func (g *Graph) executeGraphSequential() error {
 }
 
 func (g *Graph) executeGraphParallel() error {
+	ctx := context.Background()
+	return g.executeGraphParallelWithContext(ctx)
+}
+
+func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 	plan, err := g.buildExecutionPlan()
 	if err != nil {
 		return err
@@ -492,61 +514,103 @@ func (g *Graph) executeGraphParallel() error {
 
 	nodeResults := make(map[string][]any)
 	resultsMutex := sync.Mutex{}
+	nodeExecuted := make(map[string]bool)
+	nodeRunning := make(map[string]bool)
 
 	type step struct {
-		nodeName string
-		inputs   []any
+		nodeName   string
+		retryCount int
 	}
 
+	maxRetries := 1000
 	queue := []step{}
 	for _, nodeName := range plan {
-		queue = append(queue, step{nodeName: nodeName})
+		queue = append(queue, step{nodeName: nodeName, retryCount: 0})
 	}
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(plan))
 
 	for len(queue) > 0 {
+		select {
+		case <-ctx.Done():
+			return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+		default:
+		}
+
 		stepItem := queue[0]
 		queue = queue[1:]
 
-		canExecute := true
-		var inputs []any
-
-		for fromName, edges := range g.edges {
-			for _, edge := range edges {
-				if edge.to == stepItem.nodeName {
-					resultsMutex.Lock()
-					_, hasResult := nodeResults[fromName]
-					resultsMutex.Unlock()
-
-					if !hasResult {
-						canExecute = false
-						break
-					}
-
-					resultsMutex.Lock()
-					results := nodeResults[fromName]
-					resultsMutex.Unlock()
-
-					if g.evaluateCondition(edge.cond, results) {
-						inputs = append(inputs, results...)
-					}
-				}
-			}
-			if !canExecute {
-				break
-			}
+		if nodeExecuted[stepItem.nodeName] {
+			continue
 		}
 
-		if !canExecute {
+		if nodeRunning[stepItem.nodeName] {
 			queue = append(queue, stepItem)
 			continue
 		}
 
+		if stepItem.retryCount > maxRetries {
+			return &ChainError{Message: fmt.Sprintf("node %s exceeded max retries: %d", stepItem.nodeName, maxRetries)}
+		}
+
+		canExecute := false
+		var inputs []any
+
+		if g.inDegree[stepItem.nodeName] == 0 {
+			canExecute = true
+		} else {
+			allDependenciesMet := true
+			var validInputs []any
+
+			var incomingEdges []*Edge
+			for _, edges := range g.edges {
+				for _, edge := range edges {
+					if edge.to == stepItem.nodeName {
+						incomingEdges = append(incomingEdges, edge)
+					}
+				}
+			}
+
+			for _, edge := range incomingEdges {
+				resultsMutex.Lock()
+				hasResult := nodeResults[edge.from] != nil
+				resultsMutex.Unlock()
+
+				if !hasResult {
+					allDependenciesMet = false
+					break
+				}
+
+				resultsMutex.Lock()
+				results := nodeResults[edge.from]
+				resultsMutex.Unlock()
+
+				if g.evaluateCondition(edge.cond, results) {
+					validInputs = append(validInputs, results...)
+				}
+			}
+
+			if allDependenciesMet {
+				canExecute = true
+				inputs = validInputs
+			}
+		}
+
+		if !canExecute {
+			if stepItem.retryCount%10 == 0 {
+				time.Sleep(1 * time.Millisecond)
+			}
+			stepItem.retryCount++
+			queue = append(queue, stepItem)
+			continue
+		}
+
+		nodeRunning[stepItem.nodeName] = true
 		wg.Add(1)
 		go func(nodeName string, inputs []any) {
 			defer wg.Done()
+			defer func() { nodeRunning[nodeName] = false }()
 
 			results, err := g.executeNode(nodeName, inputs)
 			if err != nil {
@@ -555,6 +619,7 @@ func (g *Graph) executeGraphParallel() error {
 			}
 
 			resultsMutex.Lock()
+			nodeExecuted[nodeName] = true
 			nodeResults[nodeName] = results
 			g.stepNames[nodeName] = len(g.stepNames)
 			resultsMutex.Unlock()
@@ -564,8 +629,10 @@ func (g *Graph) executeGraphParallel() error {
 	wg.Wait()
 	close(errChan)
 
-	if err := <-errChan; err != nil {
-		return err
+	if len(errChan) > 0 {
+		if err := <-errChan; err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -589,6 +656,14 @@ func (g *Graph) RunParallel() error {
 	}
 
 	return g.executeGraphParallel()
+}
+
+func (g *Graph) RunParallelWithContext(ctx context.Context) error {
+	if g.err != nil {
+		return g.err
+	}
+
+	return g.executeGraphParallelWithContext(ctx)
 }
 
 func (g *Graph) RunWithStrategy(strategy func() error) error {
