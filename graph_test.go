@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1739,5 +1740,396 @@ func TestGraphStringOutputWithAllNodeTypes(t *testing.T) {
 	}
 	if !strings.Contains(dotOutput, "end") {
 		t.Error("Expected dot output to contain 'end'")
+	}
+}
+
+func TestGraphAddNodeWithExistingError(t *testing.T) {
+	graph := NewGraph()
+	graph.err = &ChainError{Message: "existing error"}
+
+	graph.Node("test", func() {})
+
+	if graph.err == nil {
+		t.Error("Expected error to be preserved")
+	}
+}
+
+func TestGraphAddEdgeWithExistingError(t *testing.T) {
+	graph := NewGraph()
+	graph.err = &ChainError{Message: "existing error"}
+
+	graph.Node("a", func() {})
+	graph.Node("b", func() {})
+	graph.AddEdge("a", "b")
+
+	if graph.err == nil {
+		t.Error("Expected error to be preserved")
+	}
+}
+
+func TestGraphExecuteNodeWithTooManyResults(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int {
+		return 10
+	})
+
+	err := graph.RunSequential()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	result := graph.NodeResult("start")
+	if len(result) != 1 {
+		t.Errorf("Expected 1 result, got %d", len(result))
+	}
+}
+
+func TestGraphExecuteNodeWithErrorReturn(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() (int, error) {
+		return 0, fmt.Errorf("test error")
+	})
+
+	err := graph.RunSequential()
+	if err == nil {
+		t.Error("Expected error")
+	}
+
+	nodeErr := graph.NodeError("start")
+	if nodeErr == nil {
+		t.Error("Expected node error")
+	}
+}
+
+func TestGraphBuildExecutionPlanCyclicDependency(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("a", func() int { return 1 })
+	graph.Node("b", func() int { return 2 })
+	graph.Node("c", func() int { return 3 })
+
+	graph.AddEdge("a", "b")
+	graph.AddEdge("b", "c")
+
+	graph.err = nil
+	graph.edges["c"] = append(graph.edges["c"], &Edge{from: "c", to: "a"})
+	graph.inDegree["a"]++
+
+	_, err := graph.buildExecutionPlan()
+	if err == nil {
+		t.Error("Expected error for cyclic dependency")
+	}
+}
+
+func TestGraphEvaluateConditionWithBoolValue(t *testing.T) {
+	graph := NewGraph()
+
+	result := graph.evaluateCondition(true, []any{})
+	if !result {
+		t.Error("Expected true condition to return true")
+	}
+
+	result = graph.evaluateCondition(false, []any{})
+	if result {
+		t.Error("Expected false condition to return false")
+	}
+}
+
+func TestGraphEvaluateConditionWithNoArgs(t *testing.T) {
+	graph := NewGraph()
+
+	condFn := func() bool {
+		return true
+	}
+
+	result := graph.evaluateCondition(condFn, []any{})
+	if !result {
+		t.Error("Expected condition to return true")
+	}
+}
+
+func TestGraphEvaluateConditionWithMoreParamsThanResults(t *testing.T) {
+	graph := NewGraph()
+
+	condFn := func(a, b int) bool {
+		return a > 0
+	}
+
+	result := graph.evaluateCondition(condFn, []any{10})
+	if !result {
+		t.Error("Expected condition to return true")
+	}
+}
+
+func TestGraphEvaluateConditionWithFewerParamsThanResults(t *testing.T) {
+	graph := NewGraph()
+
+	condFn := func(a int) bool {
+		return a > 0
+	}
+
+	result := graph.evaluateCondition(condFn, []any{10, 20, 30})
+	if !result {
+		t.Error("Expected condition to return true")
+	}
+}
+
+func TestGraphStringOutputWithConditionEdges(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+	graph.Node("process", func(n int) int { return n * 2 })
+	graph.AddEdgeWithCondition("start", "process", func(n int) bool { return n > 0 })
+
+	dotOutput := graph.String()
+	if !strings.Contains(dotOutput, "cond") {
+		t.Error("Expected dot output to contain 'cond' for conditional edge")
+	}
+}
+
+func TestGraphMermaidOutputWithConditionEdges(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+	graph.Node("process", func(n int) int { return n * 2 })
+	graph.AddEdgeWithCondition("start", "process", func(n int) bool { return n > 0 })
+
+	mermaidOutput := graph.Mermaid()
+	if !strings.Contains(mermaidOutput, "|cond|") {
+		t.Error("Expected mermaid output to contain '|cond|' for conditional edge")
+	}
+}
+
+func TestGraphHasCycleDirectCycle(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("a", func() {})
+	graph.Node("b", func() {})
+
+	graph.edges["a"] = []*Edge{{from: "a", to: "b"}}
+	graph.edges["b"] = []*Edge{{from: "b", to: "a"}}
+
+	if !graph.HasCycle("a", "b") {
+		t.Error("Expected cycle to be detected")
+	}
+}
+
+func TestGraphHasCycleIndirectCycle(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("a", func() {})
+	graph.Node("b", func() {})
+	graph.Node("c", func() {})
+
+	graph.edges["a"] = []*Edge{{from: "a", to: "b"}}
+	graph.edges["b"] = []*Edge{{from: "b", to: "c"}}
+	graph.edges["c"] = []*Edge{{from: "c", to: "a"}}
+
+	if !graph.HasCycle("a", "b") {
+		t.Error("Expected cycle to be detected")
+	}
+}
+
+func TestGraphHasCycleNoCycle(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("a", func() {})
+	graph.Node("b", func() {})
+	graph.Node("c", func() {})
+
+	graph.edges["a"] = []*Edge{{from: "a", to: "b"}}
+	graph.edges["b"] = []*Edge{{from: "b", to: "c"}}
+
+	if graph.HasCycle("a", "b") {
+		t.Error("Expected no cycle")
+	}
+}
+
+func TestGraphParallelExceedMaxRetries(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+	graph.Node("blocked", func(n int) int { return n * 2 })
+
+	graph.edges = make(map[string][]*Edge)
+	graph.inDegree["blocked"] = 1
+
+	err := graph.RunParallel()
+	if err == nil {
+		t.Error("Expected error for exceeded retries")
+	}
+}
+
+func TestGraphEvaluateConditionVariadicNoArgs(t *testing.T) {
+	graph := NewGraph()
+
+	condFn := func(args ...int) bool {
+		return len(args) >= 0
+	}
+
+	result := graph.evaluateCondition(condFn, []any{})
+	if !result {
+		t.Error("Expected condition to return true")
+	}
+}
+
+func TestGraphEvaluateConditionInterfaceBool(t *testing.T) {
+	graph := NewGraph()
+
+	condFn := func() any {
+		return true
+	}
+
+	result := graph.evaluateCondition(condFn, []any{})
+	if !result {
+		t.Error("Expected condition to return true")
+	}
+}
+
+func TestGraphExecuteGraphSequentialWithMultipleIncomingEdges(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() []int { return []int{10, 20} })
+	graph.Node("combine", func(a, b int) int { return a + b })
+
+	graph.AddEdge("start", "combine")
+
+	err := graph.RunSequential()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	result := graph.NodeResult("combine")
+	if len(result) != 1 {
+		t.Errorf("Expected 1 result, got %d", len(result))
+	}
+
+	if result[0].(int) != 30 {
+		t.Errorf("Expected 30, got %v", result[0])
+	}
+}
+
+func TestGraphEvaluateConditionWithFewerArgsThanResults2(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() (int, int, int) { return 10, 20, 30 })
+	graph.Node("process", func(a, b, c int) int { return a + b + c })
+	graph.AddEdgeWithCondition("start", "process", func(a int) bool {
+		return a > 0
+	})
+
+	err := graph.RunSequential()
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	status := graph.NodeStatus("process")
+	if status != NodeStatusCompleted {
+		t.Errorf("Expected process node to be completed")
+	}
+}
+
+func TestGraphEvaluateConditionInterfaceReturn(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+	graph.Node("process", func(n int) int { return n * 2 })
+	graph.AddEdgeWithCondition("start", "process", func(n int) any {
+		return true
+	})
+
+	err := graph.RunSequential()
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	status := graph.NodeStatus("process")
+	if status != NodeStatusCompleted {
+		t.Errorf("Expected process node to be completed")
+	}
+}
+
+func TestGraphEvaluateConditionInterfaceReturnFalse(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+	graph.Node("process", func(n int) int { return n * 2 })
+	graph.AddEdgeWithCondition("start", "process", func(n int) any {
+		return false
+	})
+
+	err := graph.RunSequential()
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	status := graph.NodeStatus("process")
+	if status != NodeStatusPending {
+		t.Errorf("Expected process node to be pending, got: %v", status)
+	}
+}
+
+func TestGraphExecuteNodeWithNilInputs(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+
+	graph.nodes["start"].status = NodeStatusPending
+	graph.nodes["start"].result = nil
+
+	result, err := graph.executeNode("start", nil)
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+	if len(result) != 1 || result[0].(int) != 10 {
+		t.Errorf("Expected [10], got: %v", result)
+	}
+}
+
+func TestGraphExecuteNodeResultCountMismatch(t *testing.T) {
+	graph := NewGraph()
+
+	graph.StartNode("start", func() int { return 10 })
+
+	node := graph.nodes["start"]
+	node.status = NodeStatusPending
+	node.result = nil
+
+	results := make([]reflect.Value, 10)
+	for i := range 10 {
+		results[i] = reflect.ValueOf(i)
+	}
+
+	node.result = make([]any, 0, len(results))
+	for _, result := range results {
+		node.result = append(node.result, result.Interface())
+	}
+
+	if len(node.result) != 10 {
+		t.Errorf("Expected 10 results, got: %d", len(node.result))
+	}
+}
+
+func TestGraphAddEdgeFromNonexistentNode2(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("b", func() {})
+	graph.AddEdge("nonexistent", "b")
+
+	if graph.err == nil {
+		t.Errorf("Expected error for nonexistent from node")
+	}
+}
+
+func TestGraphAddEdgeToNonexistentNode2(t *testing.T) {
+	graph := NewGraph()
+
+	graph.Node("a", func() {})
+	graph.AddEdge("a", "nonexistent")
+
+	if graph.err == nil {
+		t.Errorf("Expected error for nonexistent to node")
 	}
 }

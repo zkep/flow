@@ -45,10 +45,16 @@ func (c *Chain) Run() error {
 		return c.err
 	}
 	for i := range c.handlers {
-		c.values = c.call(c.handlers[i].fn, c.values)
-		c.handlers[i].values = c.values
+		if len(c.handlers[i].values) > 0 {
+			c.values = c.handlers[i].values
+		} else {
+			c.values = c.call(c.handlers[i].fn, c.values)
+			if c.err != nil {
+				return c.err
+			}
+			c.handlers[i].values = c.values
+		}
 	}
-
 	return c.err
 }
 
@@ -165,6 +171,8 @@ func (c *Chain) Use(names ...string) *Chain {
 			newChain.values = append(newChain.values, c.handlers[idx].values...)
 			newChain.handlers = append(newChain.handlers, c.handlers[idx])
 			newChain.stepNames[name] = len(newChain.handlers) - 1
+		} else {
+			c.err = &ChainError{Message: ErrStepNotFound}
 		}
 	}
 
@@ -184,6 +192,9 @@ func canConvert(from, to reflect.Type) bool {
 		return true
 	}
 	if from.AssignableTo(to) {
+		return true
+	}
+	if from.ConvertibleTo(to) {
 		return true
 	}
 	return false
@@ -210,7 +221,7 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 
 	if len(values) > 0 {
 		if argCount > 0 && len(values) == argCount {
-			for i := 0; i < len(values); i++ {
+			for i := range len(values) {
 				if err := addArg(&args, values[i], fnType.In(i)); err != nil {
 					return nil, err
 				}
@@ -248,7 +259,7 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 						return nil, &ChainError{Message: ErrArgCountMismatch}
 					}
 
-					for i := 0; i < elemCount; i++ {
+					for i := range elemCount {
 						elem := currentValueValue.Index(i)
 						if elem.Kind() == reflect.Interface {
 							elem = elem.Elem()

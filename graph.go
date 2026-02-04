@@ -513,9 +513,9 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 	}
 
 	nodeResults := make(map[string][]any)
-	resultsMutex := sync.Mutex{}
 	nodeExecuted := make(map[string]bool)
 	nodeRunning := make(map[string]bool)
+	var mu sync.RWMutex
 
 	type step struct {
 		nodeName   string
@@ -541,11 +541,16 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 		stepItem := queue[0]
 		queue = queue[1:]
 
-		if nodeExecuted[stepItem.nodeName] {
+		mu.RLock()
+		executed := nodeExecuted[stepItem.nodeName]
+		running := nodeRunning[stepItem.nodeName]
+		mu.RUnlock()
+
+		if executed {
 			continue
 		}
 
-		if nodeRunning[stepItem.nodeName] {
+		if running {
 			queue = append(queue, stepItem)
 			continue
 		}
@@ -573,18 +578,18 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 			}
 
 			for _, edge := range incomingEdges {
-				resultsMutex.Lock()
+				mu.RLock()
 				hasResult := nodeResults[edge.from] != nil
-				resultsMutex.Unlock()
+				mu.RUnlock()
 
 				if !hasResult {
 					allDependenciesMet = false
 					break
 				}
 
-				resultsMutex.Lock()
+				mu.RLock()
 				results := nodeResults[edge.from]
-				resultsMutex.Unlock()
+				mu.RUnlock()
 
 				if g.evaluateCondition(edge.cond, results) {
 					validInputs = append(validInputs, results...)
@@ -606,11 +611,17 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 			continue
 		}
 
+		mu.Lock()
 		nodeRunning[stepItem.nodeName] = true
+		mu.Unlock()
 		wg.Add(1)
 		go func(nodeName string, inputs []any) {
 			defer wg.Done()
-			defer func() { nodeRunning[nodeName] = false }()
+			defer func() {
+				mu.Lock()
+				nodeRunning[nodeName] = false
+				mu.Unlock()
+			}()
 
 			results, err := g.executeNode(nodeName, inputs)
 			if err != nil {
@@ -618,11 +629,11 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 				return
 			}
 
-			resultsMutex.Lock()
+			mu.Lock()
 			nodeExecuted[nodeName] = true
 			nodeResults[nodeName] = results
 			g.stepNames[nodeName] = len(g.stepNames)
-			resultsMutex.Unlock()
+			mu.Unlock()
 		}(stepItem.nodeName, inputs)
 	}
 
