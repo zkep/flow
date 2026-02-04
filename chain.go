@@ -1,6 +1,9 @@
 package flow
 
-import "reflect"
+import (
+	"fmt"
+	"reflect"
+)
 
 const (
 	ErrArgTypeMismatch  = "argument type mismatch"
@@ -14,6 +17,7 @@ type task struct {
 	name   string
 	fn     any
 	values []any
+	do     bool
 }
 
 type Chain struct {
@@ -45,15 +49,14 @@ func (c *Chain) Run() error {
 		return c.err
 	}
 	for i := range c.handlers {
-		if len(c.handlers[i].values) > 0 {
-			c.values = c.handlers[i].values
-		} else {
+		if !c.handlers[i].do {
 			c.values = c.call(c.handlers[i].fn, c.values)
 			if c.err != nil {
 				return c.err
 			}
-			c.handlers[i].values = c.values
+			c.handlers[i].do = true
 		}
+		c.handlers[i].values = c.values
 	}
 	return c.err
 }
@@ -80,7 +83,7 @@ func (c *Chain) call(fn any, values []any) []any {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.err = &ChainError{Message: ErrFunctionPanicked}
+				c.err = &ChainError{Message: fmt.Sprintf("%v: %v (fnType: %v, args: %v)", ErrFunctionPanicked, r, fnType, args)}
 			}
 		}()
 		results = fnValue.Call(args)
@@ -100,7 +103,7 @@ func (c *Chain) call(fn any, values []any) []any {
 		newValues = append(newValues, result.Interface())
 	}
 
-	if fnType.NumOut() > 1 {
+	if fnType.NumOut() > 0 {
 		lastOutType := fnType.Out(fnType.NumOut() - 1)
 		if lastOutType.Implements(reflect.TypeOf((*error)(nil)).Elem()) {
 			if len(results) == fnType.NumOut() {
@@ -108,6 +111,12 @@ func (c *Chain) call(fn any, values []any) []any {
 				if !errValue.IsNil() {
 					c.err = errValue.Interface().(error)
 				}
+			}
+			if len(newValues) > 0 {
+				newValues = newValues[:len(newValues)-1]
+			}
+			if len(newValues) == 0 {
+				return values
 			}
 		}
 	}
@@ -167,12 +176,13 @@ func (c *Chain) Use(names ...string) *Chain {
 	}
 
 	for _, name := range names {
-		if idx, ok := c.stepNames[name]; ok {
+		if idx, ok := c.stepNames[name]; !ok {
+			c.err = &ChainError{Message: ErrStepNotFound}
+			return c
+		} else {
 			newChain.values = append(newChain.values, c.handlers[idx].values...)
 			newChain.handlers = append(newChain.handlers, c.handlers[idx])
 			newChain.stepNames[name] = len(newChain.handlers) - 1
-		} else {
-			c.err = &ChainError{Message: ErrStepNotFound}
 		}
 	}
 
@@ -202,6 +212,10 @@ func canConvert(from, to reflect.Type) bool {
 
 func addArg(args *[]reflect.Value, val any, argType reflect.Type) error {
 	valValue := reflect.ValueOf(val)
+	if !valValue.IsValid() {
+		*args = append(*args, reflect.Zero(argType))
+		return nil
+	}
 	valType := valValue.Type()
 
 	if !valType.AssignableTo(argType) {
@@ -237,6 +251,11 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 					val := values[i]
 					valValue := reflect.ValueOf(val)
 
+					if !valValue.IsValid() {
+						sliceValue.Index(i).Set(reflect.Zero(elemType))
+						continue
+					}
+
 					if !valValue.Type().AssignableTo(elemType) {
 						if valValue.CanConvert(elemType) {
 							valValue = valValue.Convert(elemType)
@@ -253,7 +272,11 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 				currentValueType := reflect.TypeOf(currentValue)
 				currentValueValue := reflect.ValueOf(currentValue)
 
-				if currentValueType.Kind() == reflect.Slice || currentValueType.Kind() == reflect.Array {
+				if currentValueType == nil {
+					if argCount > 0 {
+						args = append(args, reflect.Zero(fnType.In(0)))
+					}
+				} else if currentValueType.Kind() == reflect.Slice || currentValueType.Kind() == reflect.Array {
 					elemCount := currentValueValue.Len()
 					if argCount > 0 && elemCount != argCount {
 						return nil, &ChainError{Message: ErrArgCountMismatch}

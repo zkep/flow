@@ -97,33 +97,53 @@ func TestChainMultipleReturns(t *testing.T) {
 
 func TestChainUse(t *testing.T) {
 	chain := NewChain()
+	type Result struct {
+		Step1 int
+		Step2 int
+		Step3 int
+		Step4 int
+	}
 
-	chain.Add("step1", func() int {
-		return 10
+	chain.Add("step1", func() Result {
+		return Result{Step1: 10}
 	})
 
-	chain.Add("step2", func(x int) int {
-		return x * 2
+	chain.Add("step2", func(y Result) Result {
+		y.Step2 = 20
+		return y
 	})
 
-	chain.Add("step3", func(y int) int {
-		return y + 5
+	chain.Add("step3", func(y Result) Result {
+		y.Step3 = 30
+		return y
 	})
 
 	err := chain.Run()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	if value1, err := chain.Value("step3"); err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	} else if value1.(Result).Step3 != 30 {
+		t.Errorf("Expected 30, got %v", value1)
+	}
 
-	newChain := chain.Use("step1", "step2")
+	newChain := chain.Use("step2")
+	newChain.Add("step4", func(y Result) Result {
+		y.Step4 = 40
+		return y
+	})
+	err = newChain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 
-	value1, err := newChain.Value("step1")
+	value1, err := newChain.Value("step4")
 	if err != nil {
 		t.Fatalf("Unexpected error getting value: %v", err)
 	}
-
-	if value1.(int) != 10 {
-		t.Errorf("Expected 10, got %v", value1)
+	if value1.(Result).Step4 != 40 {
+		t.Errorf("Expected 40, got %v", value1)
 	}
 
 	value2, err := newChain.Value("step2")
@@ -131,8 +151,8 @@ func TestChainUse(t *testing.T) {
 		t.Fatalf("Unexpected error getting value: %v", err)
 	}
 
-	if value2.(int) != 20 {
-		t.Errorf("Expected 20, got %v", value2)
+	if value2.(Result).Step2 != 20 {
+		t.Errorf("Expected 20, got %v", value2.(Result).Step2)
 	}
 }
 
@@ -928,5 +948,48 @@ func TestCanConvertWithConvertibleTypes(t *testing.T) {
 
 	if !canConvert(reflect.TypeOf(int32(10)), reflect.TypeOf(int64(0))) {
 		t.Error("Expected int32 to int64 to be convertible")
+	}
+}
+
+func TestChainStruct(t *testing.T) {
+	chain := NewChain()
+	type Result1 struct {
+		Step1 int
+	}
+	type Result2 struct {
+		Step2 string
+	}
+	type Result3 struct {
+		Step3 float64
+	}
+	// 每一步都返回上一步的结果
+	chain.Add("step1", func() Result1 {
+		return Result1{Step1: 10}
+	})
+	chain.Add("step2", func(x Result1) (Result1, Result2) {
+		return x, Result2{Step2: "20"}
+	})
+	chain.Add("step3", func(x Result1, y Result2) (Result1, Result2, Result3) {
+		return x, y, Result3{Step3: 30}
+	})
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	values, err := chain.Values("step3")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+	if len(values) != 3 {
+		t.Errorf("Expected 3 values, got %d", len(values))
+	}
+	if values[0].(Result1).Step1 != 10 {
+		t.Errorf("Expected Step1: 10, got %v", values[0].(Result1).Step1)
+	}
+	if values[1].(Result2).Step2 != "20" {
+		t.Errorf("Expected Step2: 20, got %v", values[1].(Result2).Step2)
+	}
+	if values[2].(Result3).Step3 != 30 {
+		t.Errorf("Expected Step3: 30, got %v", values[2].(Result3).Step3)
 	}
 }
