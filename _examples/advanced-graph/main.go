@@ -106,7 +106,7 @@ func example1ParallelExecution() {
 	g.AddEdge("aggregate_square", "end_square")
 	g.AddEdge("aggregate_cube", "end_cube")
 	g.AddEdge("aggregate_sqrt", "end_sqrt")
-
+	fmt.Println(g.Mermaid())
 	fmt.Println("   Executing graph in parallel:")
 	err := g.RunParallel()
 	if err != nil {

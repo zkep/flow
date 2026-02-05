@@ -232,7 +232,7 @@ func example4ErrorPropagation() {
 		return 10
 	})
 
-	chain2.Add("step2", "not a function")
+	chain2.Add("step2", "astep2 input is string")
 
 	chain2.Add("step3", func(y int) int {
 		return y + 5

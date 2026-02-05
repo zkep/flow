@@ -194,6 +194,15 @@ func main() {
 }
 ```
 
+### Graph Visualization
+
+```mermaid
+graph TD
+    start --> process1
+    process1 --> process2
+    process2 --> end
+```
+
 ## Usage
 
 ### Chain
@@ -510,6 +519,22 @@ if err := graph.RunParallel(); err != nil {
 }
 ```
 
+### Customer Onboarding Visualization
+
+```mermaid
+graph TD
+    sendRejection --> onboardingFailed
+    collectInfo --> creditCheck
+    collectInfo --> backgroundCheck
+    collectInfo --> documentCheck
+    creditCheck --> approval
+    backgroundCheck --> approval
+    documentCheck --> approval
+    approval --> |cond|sendApproval
+    approval --> |cond|sendRejection
+    sendApproval --> onboardingComplete
+```
+
 ### 3. ETL (Extract, Transform, Load) Workflow
 
 **Scenario**: Extracting data from multiple sources, transforming it, and loading it into a data warehouse
@@ -578,6 +603,16 @@ graph.AddEdge("transformData", "loadToWarehouse")
 if err := graph.RunParallel(); err != nil {
     fmt.Printf("ETL process failed: %v\n", err)
 }
+```
+
+### ETL Workflow Visualization
+
+```mermaid
+graph TD
+    extractFromAPI --> combineData
+    extractFromDatabase --> combineData
+    combineData --> transformData
+    transformData --> loadToWarehouse
 ```
 
 ### 4. Microservice Orchestration
@@ -669,19 +704,32 @@ if err := graph.RunParallel(); err != nil {
 }
 ```
 
+### Microservice Orchestration Visualization
+
+```mermaid
+graph TD
+    shipOrder --> sendNotification
+    createOrder --> checkInventory
+    checkInventory --> |cond|processPayment
+    checkInventory --> |cond|restoreInventory
+    checkInventory --> updateInventory
+    processPayment --> |cond|shipOrder
+    processPayment --> |cond|cancelPayment
+```
+
 ## Examples
 
 The library includes several examples in the `_examples` directory:
 
 - **Basic Examples**:
-  - `basic-chain`: Basic chain workflow
-  - `basic-graph`: Basic graph workflow
+  - [`basic-chain`](https://github.com/zkep/flow/tree/master/_examples/basic-chain): Basic chain workflow
+  - [`basic-graph`](https://github.com/zkep/flow/tree/master/_examples/basic-graph): Basic graph workflow
 
 - **Advanced Examples**:
-  - `advanced-chain`: Advanced chain with complex parameter passing
-  - `advanced-graph`: Advanced graph with multiple node types
-  - `combined-flow`: Combining chain and graph workflows
-  - `advanced-processing`: Advanced processing patterns
+  - [`advanced-chain`](https://github.com/zkep/flow/tree/master/_examples/advanced-chain): Advanced chain with complex parameter passing
+  - [`advanced-graph`](https://github.com/zkep/flow/tree/master/_examples/advanced-graph): Advanced graph with multiple node types
+  - [`combined-flow`](https://github.com/zkep/flow/tree/master/_examples/combined-flow): Combining chain and graph workflows
+  - [`advanced-processing`](https://github.com/zkep/flow/tree/master/_examples/advanced-processing): Advanced processing patterns
 
 ## Contributing
 

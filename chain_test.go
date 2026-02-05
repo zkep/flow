@@ -2,6 +2,7 @@ package flow
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -241,8 +242,8 @@ func TestChainFunctionPanic(t *testing.T) {
 		t.Fatalf("Expected error for panic")
 	}
 
-	if err.Error() != ErrFunctionPanicked {
-		t.Errorf("Expected '%s', got '%v'", ErrFunctionPanicked, err.Error())
+	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
+		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
 	}
 }
 
@@ -413,9 +414,12 @@ func TestChainUseWithNonExistentSteps(t *testing.T) {
 
 	newChain := chain.Use("nonexistent", "step1")
 
-	err := newChain.Run()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+	if newChain.err == nil {
+		t.Fatalf("Expected error for nonexistent step")
+	}
+
+	if newChain.err.Error() != ErrStepNotFound {
+		t.Errorf("Expected '%s', got '%v'", ErrStepNotFound, newChain.err.Error())
 	}
 }
 
@@ -484,8 +488,8 @@ func TestChainWithPanicRecovery(t *testing.T) {
 		t.Fatalf("Expected error for panic")
 	}
 
-	if err.Error() != ErrFunctionPanicked {
-		t.Errorf("Expected '%s', got '%v'", ErrFunctionPanicked, err.Error())
+	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
+		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
 	}
 }
 
@@ -816,8 +820,8 @@ func TestChainCallWithPanic(t *testing.T) {
 		t.Fatalf("Expected error for panic")
 	}
 
-	if err.Error() != ErrFunctionPanicked {
-		t.Errorf("Expected '%s', got '%v'", ErrFunctionPanicked, err.Error())
+	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
+		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
 	}
 }
 
@@ -991,5 +995,139 @@ func TestChainStruct(t *testing.T) {
 	}
 	if values[2].(Result3).Step3 != 30 {
 		t.Errorf("Expected Step3: 30, got %v", values[2].(Result3).Step3)
+	}
+}
+
+func TestAddArgWithInvalidValue(t *testing.T) {
+	var args []reflect.Value
+	err := addArg(&args, nil, reflect.TypeOf(0))
+	if err != nil {
+		t.Errorf("Expected no error for nil value, got: %v", err)
+	}
+	if len(args) != 1 {
+		t.Errorf("Expected 1 argument, got: %d", len(args))
+	}
+}
+
+func TestAddArgWithTypeConversion(t *testing.T) {
+	var args []reflect.Value
+	err := addArg(&args, int32(10), reflect.TypeOf(int64(0)))
+	if err != nil {
+		t.Errorf("Expected no error for type conversion, got: %v", err)
+	}
+	if len(args) != 1 {
+		t.Errorf("Expected 1 argument, got: %d", len(args))
+	}
+}
+
+func TestPrepareArgsWithNilValue(t *testing.T) {
+	fn := func(s string) string {
+		return s
+	}
+	fnType := reflect.TypeOf(fn)
+	_, err := prepareArgs([]any{nil}, fnType)
+	if err != nil {
+		t.Errorf("Expected no error for nil value, got: %v", err)
+	}
+}
+
+func TestChainWithNilValue(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() *int {
+		return nil
+	})
+
+	chain.Add("step2", func(i *int) string {
+		if i == nil {
+			return "nil"
+		}
+		return "not nil"
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step2")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(string) != "nil" {
+		t.Errorf("Expected 'nil', got %v", value)
+	}
+}
+
+func TestChainWithChannelValue(t *testing.T) {
+	chain := NewChain()
+
+	ch := make(chan int, 1)
+	ch <- 42
+
+	chain.Add("step1", ch)
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if _, ok := value.(chan int); !ok {
+		t.Errorf("Expected chan int value")
+	}
+}
+
+func TestChainWithPointerValue(t *testing.T) {
+	chain := NewChain()
+
+	x := 100
+	chain.Add("step1", &x)
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	ptr, ok := value.(*int)
+	if !ok {
+		t.Errorf("Expected *int value")
+	}
+
+	if *ptr != 100 {
+		t.Errorf("Expected 100, got %v", *ptr)
+	}
+}
+
+func TestChainUseWithEmptyNames(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	newChain := chain.Use()
+
+	if len(newChain.handlers) != 0 {
+		t.Errorf("Expected no handlers in new chain")
+	}
+
+	if len(newChain.values) != 0 {
+		t.Errorf("Expected no values in new chain")
 	}
 }

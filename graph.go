@@ -514,6 +514,7 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 
 	nodeResults := make(map[string][]any)
 	nodeExecuted := make(map[string]bool)
+	nodeFailed := make(map[string]bool)
 	nodeRunning := make(map[string]bool)
 	var mu sync.RWMutex
 
@@ -538,15 +539,24 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 		default:
 		}
 
+		select {
+		case err := <-errChan:
+			wg.Wait()
+			close(errChan)
+			return err
+		default:
+		}
+
 		stepItem := queue[0]
 		queue = queue[1:]
 
 		mu.RLock()
 		executed := nodeExecuted[stepItem.nodeName]
+		failed := nodeFailed[stepItem.nodeName]
 		running := nodeRunning[stepItem.nodeName]
 		mu.RUnlock()
 
-		if executed {
+		if executed || failed {
 			continue
 		}
 
@@ -566,6 +576,9 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 			canExecute = true
 		} else {
 			allDependenciesMet := true
+			dependencyFailed := false
+			dependencySkipped := false
+			hasValidEdge := false
 			var validInputs []any
 
 			var incomingEdges []*Edge
@@ -579,8 +592,20 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 
 			for _, edge := range incomingEdges {
 				mu.RLock()
+				fromFailed := nodeFailed[edge.from]
+				fromExecuted := nodeExecuted[edge.from]
 				hasResult := nodeResults[edge.from] != nil
 				mu.RUnlock()
+
+				if fromFailed {
+					dependencyFailed = true
+					break
+				}
+
+				if fromExecuted && !hasResult {
+					dependencySkipped = true
+					break
+				}
 
 				if !hasResult {
 					allDependenciesMet = false
@@ -592,13 +617,33 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 				mu.RUnlock()
 
 				if g.evaluateCondition(edge.cond, results) {
+					hasValidEdge = true
 					validInputs = append(validInputs, results...)
 				}
 			}
 
-			if allDependenciesMet {
+			if dependencyFailed {
+				mu.Lock()
+				nodeFailed[stepItem.nodeName] = true
+				mu.Unlock()
+				continue
+			}
+
+			if dependencySkipped {
+				mu.Lock()
+				nodeExecuted[stepItem.nodeName] = true
+				mu.Unlock()
+				continue
+			}
+
+			if allDependenciesMet && hasValidEdge {
 				canExecute = true
 				inputs = validInputs
+			} else if allDependenciesMet && !hasValidEdge {
+				mu.Lock()
+				nodeExecuted[stepItem.nodeName] = true
+				mu.Unlock()
+				continue
 			}
 		}
 
@@ -625,7 +670,10 @@ func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
 
 			results, err := g.executeNode(nodeName, inputs)
 			if err != nil {
-				errChan <- err
+				mu.Lock()
+				nodeFailed[nodeName] = true
+				mu.Unlock()
+				errChan <- &ChainError{Message: fmt.Sprintf("node %s failed: %v", nodeName, err)}
 				return
 			}
 

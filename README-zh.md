@@ -177,14 +177,14 @@ func main() {
         return x + 5
     })
 
-    g.EndNode("end", func(x int) {
+    g.EndNode("end1", func(x int) {
         fmt.Printf("执行结束节点: 最终结果是 %d\n", x)
     })
 
     g.AddEdge("start", "process1")
     g.AddEdge("process1", "process2")
-    g.AddEdge("process2", "end")
-
+    g.AddEdge("process2", "end1")
+    
     err := g.Run()
     if err != nil {
         fmt.Printf("错误: %v\n", err)
@@ -192,6 +192,13 @@ func main() {
         fmt.Println("执行成功完成")
     }
 }
+```
+### Graph 数据可视化
+```mermaid
+graph TD
+    start --> process1
+    process1 --> process2
+    process2 --> end1
 ```
 
 ## 使用说明
@@ -430,85 +437,114 @@ if err := chain.Run(); err != nil {
 
 **示例**：
 ```go
-graph := flow.NewGraph()
+package main
 
-// 开始收集客户信息
-graph.StartNode("collectInfo", func() map[string]string {
-    return map[string]string{
-        "name": "John Doe",
-        "email": "john@example.com",
-        "score": "85",
-    }
-})
+import (
+	"fmt"
+	"strconv"
+	"time"
 
-// 信用检查
-graph.Node("creditCheck", func(info map[string]string) bool {
-    score, _ := strconv.Atoi(info["score"])
-    return score > 70
-})
+	"github.com/zkep/flow"
+)
 
-// 背景验证（并行）
-graph.ParallelNode("backgroundCheck", func(info map[string]string) bool {
-    // 模拟背景检查
-    time.Sleep(100 * time.Millisecond)
-    return true
-})
+func main() {
+	graph := flow.NewGraph()
+	collectInfo := map[string]string{
+		"name":  "John Doe",
+		"email": "john@example.com",
+		"score": "85",
+	}
+	// 开始收集客户信息
+	graph.StartNode("collectInfo", func() map[string]string {
+		return collectInfo
+	})
 
-// 文档验证（并行）
-graph.ParallelNode("documentCheck", func(info map[string]string) bool {
-    // 模拟文档验证
-    time.Sleep(150 * time.Millisecond)
-    return true
-})
+	// 信用检查
+	graph.Node("creditCheck", func(info map[string]string) bool {
+		score, _ := strconv.Atoi(info["score"])
+		return score > 70
+	})
 
-// 审批决策
-graph.BranchNode("approval", func(creditOk, backgroundOk, documentOk bool) string {
-    if creditOk && backgroundOk && documentOk {
-        return "approve"
-    }
-    return "reject"
-})
+	// 背景验证（并行）
+	graph.ParallelNode("backgroundCheck", func(info map[string]string) bool {
+		// 模拟背景检查
+		time.Sleep(100 * time.Millisecond)
+		return true
+	})
 
-// 批准路径
-graph.Node("sendApproval", func(info map[string]string) {
-    fmt.Printf("批准客户: %s\n", info["name"])
-})
+	// 文档验证（并行）
+	graph.ParallelNode("documentCheck", func(info map[string]string) bool {
+		// 模拟文档验证
+		time.Sleep(150 * time.Millisecond)
+		return true
+	})
 
-// 拒绝路径
-graph.Node("sendRejection", func(info map[string]string) {
-    fmt.Printf("拒绝客户: %s\n", info["name"])
-})
+	// 审批决策
+	graph.BranchNode("approval", func(creditOk, backgroundOk, documentOk bool) string {
+		if creditOk && backgroundOk && documentOk {
+			return "approve"
+		}
+		return "reject"
+	})
 
-// 结束节点
-graph.EndNode("onboardingComplete", func() {
-    fmt.Println("客户入职成功完成")
-})
+	// 批准路径
+	graph.Node("sendApproval", func() {
+		fmt.Printf("批准客户: %s\n", collectInfo["name"])
+	})
 
-graph.EndNode("onboardingFailed", func() {
-    fmt.Println("客户入职失败")
-})
+	// 拒绝路径
+	graph.Node("sendRejection", func() {
+		fmt.Printf("拒绝客户: %s\n", collectInfo["name"])
+	})
 
-// 添加边
-graph.AddEdge("collectInfo", "creditCheck")
-graph.AddEdge("collectInfo", "backgroundCheck")
-graph.AddEdge("collectInfo", "documentCheck")
-graph.AddEdge("creditCheck", "approval")
-graph.AddEdge("backgroundCheck", "approval")
-graph.AddEdge("documentCheck", "approval")
-graph.AddEdgeWithCondition("approval", "sendApproval", func(decision string) bool {
-    return decision == "approve"
-})
-graph.AddEdgeWithCondition("approval", "sendRejection", func(decision string) bool {
-    return decision == "reject"
-})
-graph.AddEdge("sendApproval", "onboardingComplete")
-graph.AddEdge("sendRejection", "onboardingFailed")
+	// 结束节点
+	graph.EndNode("onboardingComplete", func() {
+		fmt.Println("客户入职成功完成")
+	})
 
-// 并行运行以提高速度
-if err := graph.RunParallel(); err != nil {
-    fmt.Printf("入职流程失败: %v\n", err)
+	graph.EndNode("onboardingFailed", func() {
+		fmt.Println("客户入职失败")
+	})
+
+	// 添加边
+	graph.AddEdge("collectInfo", "creditCheck")
+	graph.AddEdge("collectInfo", "backgroundCheck")
+	graph.AddEdge("collectInfo", "documentCheck")
+	graph.AddEdge("creditCheck", "approval")
+	graph.AddEdge("backgroundCheck", "approval")
+	graph.AddEdge("documentCheck", "approval")
+	graph.AddEdgeWithCondition("approval", "sendApproval", func(decision string) bool {
+		return decision == "approve"
+	})
+	graph.AddEdgeWithCondition("approval", "sendRejection", func(decision string) bool {
+		return decision == "reject"
+	})
+	graph.AddEdge("sendApproval", "onboardingComplete")
+	graph.AddEdge("sendRejection", "onboardingFailed")
+	fmt.Println(graph.Mermaid())
+	// 并行运行以提高速度
+	if err := graph.RunParallel(); err != nil {
+		fmt.Printf("入职流程失败: %v\n", err)
+	}
 }
 ```
+
+### 3. 客户入职流程可视化
+```mermaid
+graph TD
+
+    sendRejection --> onboardingFailed
+    collectInfo --> creditCheck
+    collectInfo --> backgroundCheck
+    collectInfo --> documentCheck
+    creditCheck --> approval
+    backgroundCheck --> approval
+    documentCheck --> approval
+    approval --> |cond|sendApproval
+    approval --> |cond|sendRejection
+    sendApproval --> onboardingComplete
+```
+
 
 ### 3. ETL（提取、转换、加载）工作流
 
@@ -521,63 +557,85 @@ if err := graph.RunParallel(); err != nil {
 
 **示例**：
 ```go
-graph := flow.NewGraph()
+package main
 
-// 并行从多个源提取数据
-graph.ParallelNode("extractFromAPI", func() []map[string]interface{} {
-    // 从 API 提取数据
-    return []map[string]interface{}{
-        {"id": 1, "name": "Product A", "price": 100},
-        {"id": 2, "name": "Product B", "price": 200},
-    }
-})
+import (
+	"fmt"
 
-graph.ParallelNode("extractFromDatabase", func() []map[string]interface{} {
-    // 从数据库提取数据
-    return []map[string]interface{}{
-        {"id": 3, "name": "Product C", "price": 150},
-        {"id": 4, "name": "Product D", "price": 250},
-    }
-})
+	"github.com/zkep/flow"
+)
 
-// 合并提取的数据
-graph.Node("combineData", func(apiData, dbData []map[string]interface{}) []map[string]interface{} {
-    combined := append(apiData, dbData...)
-    return combined
-})
+func main() {
+	graph := flow.NewGraph()
 
-// 转换数据
-graph.Node("transformData", func(data []map[string]interface{}) []map[string]interface{} {
-    var transformed []map[string]interface{}
-    for _, item := range data {
-        price := item["price"].(int)
-        item["priceWithTax"] = price * 1.2 // 添加 20% 税
-        item["category"] = "General"
-        transformed = append(transformed, item)
-    }
-    return transformed
-})
+	// 并行从多个源提取数据
+	graph.ParallelNode("extractFromAPI", func() []map[string]interface{} {
+		// 从 API 提取数据
+		return []map[string]interface{}{
+			{"id": 1, "name": "Product A", "price": 100},
+			{"id": 2, "name": "Product B", "price": 200},
+		}
+	})
 
-// 加载数据
-graph.EndNode("loadToWarehouse", func(data []map[string]interface{}) error {
-    fmt.Printf("将 %d 个项目加载到数据仓库\n", len(data))
-    // 加载数据到仓库
-    for _, item := range data {
-        fmt.Printf("加载: %v\n", item)
-    }
-    return nil
-})
+	graph.ParallelNode("extractFromDatabase", func() []map[string]interface{} {
+		// 从数据库提取数据
+		return []map[string]interface{}{
+			{"id": 3, "name": "Product C", "price": 150},
+			{"id": 4, "name": "Product D", "price": 250},
+		}
+	})
 
-// 添加边
-graph.AddEdge("extractFromAPI", "combineData")
-graph.AddEdge("extractFromDatabase", "combineData")
-graph.AddEdge("combineData", "transformData")
-graph.AddEdge("transformData", "loadToWarehouse")
+	// 合并提取的数据
+	graph.Node("combineData", func(apiData, dbData []map[string]interface{}) []map[string]interface{} {
+		combined := append(apiData, dbData...)
+		return combined
+	})
 
-// 并行运行
-if err := graph.RunParallel(); err != nil {
-    fmt.Printf("ETL 流程失败: %v\n", err)
+	// 转换数据
+	graph.Node("transformData", func(data []map[string]interface{}) []map[string]interface{} {
+		var transformed []map[string]interface{}
+		for _, item := range data {
+			price := item["price"].(int)
+			item["priceWithTax"] = int(float64(price) * 1.2) // 添加 20% 税
+			item["category"] = "General"
+			transformed = append(transformed, item)
+		}
+		return transformed
+	})
+
+	// 加载数据
+	graph.EndNode("loadToWarehouse", func(data []map[string]interface{}) error {
+		fmt.Printf("将 %d 个项目加载到数据仓库\n", len(data))
+		// 加载数据到仓库
+		for _, item := range data {
+			fmt.Printf("加载: %v\n", item)
+		}
+		return nil
+	})
+
+	// 添加边
+	graph.AddEdge("extractFromAPI", "combineData")
+	graph.AddEdge("extractFromDatabase", "combineData")
+	graph.AddEdge("combineData", "transformData")
+	graph.AddEdge("transformData", "loadToWarehouse")
+
+	fmt.Println(graph.Mermaid())
+	// 并行运行
+	if err := graph.RunParallel(); err != nil {
+		fmt.Printf("ETL 流程失败: %v\n", err)
+	}
 }
+
+```
+
+ETL 工作流可视化
+```mermaid
+graph TD
+
+    extractFromAPI --> combineData
+    extractFromDatabase --> combineData
+    combineData --> transformData
+    transformData --> loadToWarehouse
 ```
 
 ### 4. 微服务编排
@@ -591,82 +649,104 @@ if err := graph.RunParallel(); err != nil {
 
 **示例**：
 ```go
-graph := flow.NewGraph()
+package main
 
-// 开始订单信息
-graph.StartNode("createOrder", func() map[string]interface{} {
-    return map[string]interface{}{
-        "orderId": "ORD-123",
-        "customerId": "CUST-456",
-        "items": []string{"ITEM-1", "ITEM-2"},
-        "total": 300,
-    }
-})
+import (
+	"fmt"
 
-// 检查库存
-graph.Node("checkInventory", func(order map[string]interface{}) bool {
-    // 库存检查服务
-    fmt.Println("检查库存...")
-    return true // 库存可用
-})
+	"github.com/zkep/flow"
+)
 
-// 处理支付
-graph.Node("processPayment", func(order map[string]interface{}) bool {
-    // 支付服务
-    fmt.Println("处理支付...")
-    return true // 支付成功
-})
+func main() {
+	graph := flow.NewGraph()
 
-// 更新库存（与支付并行）
-graph.ParallelNode("updateInventory", func(order map[string]interface{}) bool {
-    // 库存服务
-    fmt.Println("更新库存...")
-    return true
-})
+	// 开始订单信息
+	graph.StartNode("createOrder", func() map[string]interface{} {
+		return map[string]interface{}{
+			"orderId":    "ORD-123",
+			"customerId": "CUST-456",
+			"items":      []string{"ITEM-1", "ITEM-2"},
+			"total":      300,
+		}
+	})
 
-// 发货
-graph.Node("shipOrder", func(order map[string]interface{}) string {
-    // 物流服务
-    fmt.Println("发货...")
-    return "SHIP-789"
-})
+	// 检查库存
+	graph.Node("checkInventory", func(order map[string]interface{}) bool {
+		// 库存检查服务
+		fmt.Println("检查库存...")
+		return true // 库存可用
+	})
 
-// 发送通知
-graph.EndNode("sendNotification", func(order map[string]interface{}, trackingId string) {
-    // 通知服务
-    fmt.Printf("为订单 %s 发送通知，追踪号 %s\n", order["orderId"], trackingId)
-})
+	// 处理支付
+	graph.Node("processPayment", func(available bool) bool {
+		// 支付服务
+		fmt.Println("处理支付...")
+		return true // 支付成功
+	})
 
-// 失败补偿节点
-graph.Node("cancelPayment", func(order map[string]interface{}) {
-    fmt.Printf("取消订单 %s 的支付\n", order["orderId"])
-})
+	// 更新库存（与支付并行）
+	graph.ParallelNode("updateInventory", func(available bool) bool {
+		// 库存服务
+		fmt.Println("更新库存...")
+		return true
+	})
 
-graph.Node("restoreInventory", func(order map[string]interface{}) {
-    fmt.Printf("恢复订单 %s 的库存\n", order["orderId"])
-})
+	// 发货
+	graph.Node("shipOrder", func(success bool) string {
+		// 物流服务
+		fmt.Println("发货...")
+		return "SHIP-789"
+	})
 
-// 添加边
-graph.AddEdge("createOrder", "checkInventory")
-graph.AddEdgeWithCondition("checkInventory", "processPayment", func(available bool) bool {
-    return available
-})
-graph.AddEdgeWithCondition("checkInventory", "restoreInventory", func(available bool) bool {
-    return !available
-})
-graph.AddEdge("checkInventory", "updateInventory")
-graph.AddEdgeWithCondition("processPayment", "shipOrder", func(success bool) bool {
-    return success
-})
-graph.AddEdgeWithCondition("processPayment", "cancelPayment", func(success bool) bool {
-    return !success
-})
-graph.AddEdge("shipOrder", "sendNotification")
+	// 发送通知
+	graph.EndNode("sendNotification", func(trackingId string) {
+		// 通知服务
+		fmt.Printf("发货完成，追踪号 %s\n", trackingId)
+	})
 
-// 为独立服务并行运行
-if err := graph.RunParallel(); err != nil {
-    fmt.Printf("订单处理失败: %v\n", err)
+	// 失败补偿节点
+	graph.Node("cancelPayment", func(success bool) {
+		fmt.Println("取消支付")
+	})
+
+	graph.Node("restoreInventory", func(available bool) {
+		fmt.Println("恢复库存")
+	})
+
+	// 添加边
+	graph.AddEdge("createOrder", "checkInventory")
+	graph.AddEdgeWithCondition("checkInventory", "processPayment", func(available bool) bool {
+		return available
+	})
+	graph.AddEdgeWithCondition("checkInventory", "restoreInventory", func(available bool) bool {
+		return !available
+	})
+	graph.AddEdge("checkInventory", "updateInventory")
+	graph.AddEdgeWithCondition("processPayment", "shipOrder", func(success bool) bool {
+		return success
+	})
+	graph.AddEdgeWithCondition("processPayment", "cancelPayment", func(success bool) bool {
+		return !success
+	})
+	graph.AddEdge("shipOrder", "sendNotification")
+	fmt.Println(graph.Mermaid())
+	// 为独立服务并行运行
+	if err := graph.RunParallel(); err != nil {
+		fmt.Printf("订单处理失败: %v\n", err)
+	}
 }
+```
+数据可视化
+```mermaid
+graph TD
+
+    shipOrder --> sendNotification
+    createOrder --> checkInventory
+    checkInventory --> |cond|processPayment
+    checkInventory --> |cond|restoreInventory
+    checkInventory --> updateInventory
+    processPayment --> |cond|shipOrder
+    processPayment --> |cond|cancelPayment
 ```
 
 ## 示例
@@ -674,14 +754,14 @@ if err := graph.RunParallel(); err != nil {
 库在 `_examples` 目录中包含多个示例：
 
 - **基础示例**：
-  - `basic-chain`：基础链式工作流
-  - `basic-graph`：基础图形工作流
+  - [`basic-chain`](https://github.com/zkep/flow/tree/master/_examples/basic-chain)：基础链式工作流
+  - [`basic-graph`](https://github.com/zkep/flow/tree/master/_examples/basic-graph)：基础图形工作流
 
 - **高级示例**：
-  - `advanced-chain`：具有复杂参数传递的高级链式工作流
-  - `advanced-graph`：具有多种节点类型的高级图形工作流
-  - `combined-flow`：组合链式和图形工作流
-  - `advanced-processing`：高级处理模式
+  - [`advanced-chain`](https://github.com/zkep/flow/tree/master/_examples/advanced-chain)：具有复杂参数传递的高级链式工作流
+  - [`advanced-graph`](https://github.com/zkep/flow/tree/master/_examples/advanced-graph)：具有多种节点类型的高级图形工作流
+  - [`combined-flow`](https://github.com/zkep/flow/tree/master/_examples/combined-flow)：组合链式和图形工作流
+  - [`advanced-processing`](https://github.com/zkep/flow/tree/master/_examples/advanced-processing)：高级处理模式
 
 ## 贡献
 
