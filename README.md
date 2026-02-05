@@ -177,13 +177,13 @@ func main() {
         return x + 5
     })
 
-    g.EndNode("end", func(x int) {
-        fmt.Printf("Executing end node: Final result is %d\n", x)
+    g.EndNode("end1", func(x int) {
+        fmt.Printf("Executing end1 node: Final result is %d\n", x)
     })
 
     g.AddEdge("start", "process1")
     g.AddEdge("process1", "process2")
-    g.AddEdge("process2", "end")
+    g.AddEdge("process2", "end1")
 
     err := g.Run()
     if err != nil {
@@ -200,7 +200,7 @@ func main() {
 graph TD
     start --> process1
     process1 --> process2
-    process2 --> end
+    process2 --> end1
 ```
 
 ## Usage
