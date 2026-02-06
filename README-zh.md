@@ -815,8 +815,6 @@ graph TD
 - **高级示例**:
   - [`advanced-chain`](https://github.com/zkep/flow/tree/master/_examples/advanced-chain): 带有复杂参数传递的高级链
   - [`advanced-graph`](https://github.com/zkep/flow/tree/master/_examples/advanced-graph): 具有多种节点类型的高级图
-  - [`combined-flow`](https://github.com/zkep/flow/tree/master/_examples/combined-flow): 组合链和图工作流
-  - [`advanced-processing`](https://github.com/zkep/flow/tree/master/_examples/advanced-processing): 高级处理模式
 
 ## 贡献
 
