@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 )
 
 const (
@@ -18,15 +18,68 @@ const (
 	ErrExecutionFailed  = "execution failed"
 )
 
-type NodeType int
-
 const (
-	NodeTypeNormal NodeType = iota
-	NodeTypeStart
-	NodeTypeEnd
-	NodeTypeBranch
-	NodeTypeParallel
-	NodeTypeLoop
+	DefaultMaxIterations = 10000
+)
+
+var (
+	anySlicePool          = NewSlicePool[any](128, 32)
+	stringSlicePool       = NewSlicePool[string](128, 32)
+	reflectValueSlicePool = NewSlicePool[reflect.Value](128, 32)
+
+	nodePool = NewObjectPool(
+		func() *Node { return &Node{} },
+		WithReset(func(n *Node) {
+			n.name = ""
+			n.status = NodeStatusPending
+			n.fn = nil
+			n.fnValue = reflect.Value{}
+			n.fnType = nil
+			n.argTypes = nil
+			n.numOut = 0
+			n.hasErrorReturn = false
+			n.description = ""
+			n.inputs = nil
+			n.outputs = nil
+			n.err = nil
+			n.result = nil
+			n.callFn = nil
+			n.argCount = 0
+			n.sliceArg = false
+			n.sliceElemType = nil
+		}),
+	)
+	edgePool = NewObjectPool(
+		func() *Edge { return &Edge{} },
+		WithReset(func(e *Edge) {
+			e.from = ""
+			e.to = ""
+			e.cond = nil
+			e.condFunc = nil
+			e.condComp = nil
+			e.weight = 0
+			e.edgeType = EdgeTypeNormal
+		}),
+	)
+	nodeStatePool = NewObjectPool(
+		func() *nodeState { return &nodeState{} },
+		WithReset(func(s *nodeState) {
+			s.results = nil
+			s.err = nil
+			s.done = 0
+			s.finished = 0
+			s.doneSig = nil
+		}),
+	)
+	condCompilerPool = NewObjectPool(
+		func() *condCompiler { return &condCompiler{} },
+		WithReset(func(c *condCompiler) {
+			c.fnValue = reflect.Value{}
+			c.fnType = nil
+			c.argCount = 0
+			c.isVariadic = false
+		}),
+	)
 )
 
 type NodeStatus int
@@ -38,24 +91,102 @@ const (
 	NodeStatusFailed
 )
 
+type EdgeType int
+
+const (
+	EdgeTypeNormal EdgeType = iota
+	EdgeTypeLoop
+	EdgeTypeBranch
+)
+
+type CondFunc func([]any) bool
+
+type condCompiler struct {
+	fnValue    reflect.Value
+	fnType     reflect.Type
+	argCount   int
+	isVariadic bool
+}
+
+func newCondCompiler(cond any) *condCompiler {
+	c := condCompilerPool.Get()
+	c.fnValue = reflect.ValueOf(cond)
+	c.fnType = c.fnValue.Type()
+	c.argCount = c.fnType.NumIn()
+	c.isVariadic = c.fnType.IsVariadic()
+	return c
+}
+
+func (c *condCompiler) eval(results []any) bool {
+	args := argsPool.Get(c.argCount)
+	defer argsPool.Put(args)
+
+	if c.isVariadic && len(results) > 0 {
+		sliceType := c.fnType.In(c.argCount - 1).Elem()
+		slice := reflect.MakeSlice(reflect.SliceOf(sliceType), 0, len(results))
+		for _, result := range results {
+			slice = reflect.Append(slice, reflect.ValueOf(result))
+		}
+		args = append(args, slice)
+	} else if c.argCount > 0 {
+		resultCount := min(len(results), c.argCount)
+		for i := range resultCount {
+			args = append(args, reflect.ValueOf(results[i]))
+		}
+		for i := resultCount; i < c.argCount; i++ {
+			args = append(args, reflect.Zero(c.fnType.In(i)))
+		}
+	}
+
+	var condResult []reflect.Value
+	if c.isVariadic {
+		condResult = c.fnValue.CallSlice(args)
+	} else {
+		condResult = c.fnValue.Call(args)
+	}
+
+	if len(condResult) > 0 {
+		if condResult[0].Kind() == reflect.Bool {
+			return condResult[0].Bool()
+		}
+		if condResult[0].Kind() == reflect.Interface && !condResult[0].IsNil() {
+			if b, ok := condResult[0].Elem().Interface().(bool); ok {
+				return b
+			}
+		}
+	}
+	return true
+}
+
 type Edge struct {
-	from   string
-	to     string
-	cond   any
-	weight int
+	from     string
+	to       string
+	cond     any
+	condFunc CondFunc
+	condComp *condCompiler
+	weight   int
+	edgeType EdgeType
 }
 
 type Node struct {
-	name        string
-	nodeType    NodeType
-	status      NodeStatus
-	fn          any
-	description string
-	inputs      []string
-	outputs     []string
-	err         error
-	result      []any
-	waitGroup   sync.WaitGroup
+	name           string
+	status         NodeStatus
+	fn             any
+	fnValue        reflect.Value
+	fnType         reflect.Type
+	argTypes       []reflect.Type
+	numOut         int
+	hasErrorReturn bool
+	description    string
+	inputs         []string
+	outputs        []string
+	err            error
+	result         []any
+	waitGroup      sync.WaitGroup
+	callFn         func([]any) ([]any, error)
+	argCount       int
+	sliceArg       bool
+	sliceElemType  reflect.Type
 }
 
 type NodeExecution struct {
@@ -65,26 +196,119 @@ type NodeExecution struct {
 }
 
 type Graph struct {
-	nodes     map[string]*Node
-	edges     map[string][]*Edge
-	inDegree  map[string]int
-	outDegree map[string]int
-	stepNames map[string]int
-	err       error
-	mu        sync.Mutex
+	nodes             map[string]*Node
+	edges             map[string][]*Edge
+	inDegree          map[string]int
+	outDegree         map[string]int
+	stepNames         map[string]int
+	err               error
+	mu                sync.RWMutex
+	execPlan          []string
+	execPlanValid     bool
+	execResults       map[string][]any
+	execInEdges       map[string][]*Edge
+	branchTargetNodes map[string]bool
+	tempInDegree      map[string]int
+	visited           map[string]bool
+	path              map[string]bool
+	execStates        map[string]*nodeState
+	layers            [][]string
+	layersValid       bool
+	largeThreshold    int
 }
 
-func NewGraph() *Graph {
-	return &Graph{
-		nodes:     make(map[string]*Node),
-		edges:     make(map[string][]*Edge),
-		inDegree:  make(map[string]int),
-		outDegree: make(map[string]int),
-		stepNames: make(map[string]int),
+const largeGraphThreshold = 128
+
+type localWorkerPool struct {
+	workers  int
+	taskChan chan *nodeTask
+	wg       sync.WaitGroup
+}
+
+var localWorkerPoolPool = sync.Pool{
+	New: func() any {
+		return &localWorkerPool{}
+	},
+}
+
+func newLocalWorkerPool(workers int) *localWorkerPool {
+	if workers <= 0 {
+		workers = defaultWorkerCount
+	}
+	pool := localWorkerPoolPool.Get().(*localWorkerPool)
+	pool.workers = workers
+	if pool.taskChan == nil || cap(pool.taskChan) < workers*4 {
+		pool.taskChan = make(chan *nodeTask, workers*4)
+	} else {
+		for len(pool.taskChan) > 0 {
+			<-pool.taskChan
+		}
+	}
+	for i := 0; i < workers; i++ {
+		pool.wg.Add(1)
+		go pool.worker()
+	}
+	return pool
+}
+
+func (p *localWorkerPool) worker() {
+	defer p.wg.Done()
+	for task := range p.taskChan {
+		if task == nil {
+			return
+		}
+		executeNodeWorkerTask(task)
+		taskPool.Put(task)
 	}
 }
 
-func (g *Graph) addNode(name string, fn any, nodeType NodeType) *Graph {
+func (p *localWorkerPool) Submit(task *nodeTask) {
+	p.taskChan <- task
+}
+
+func (p *localWorkerPool) Shutdown() {
+	for i := 0; i < p.workers; i++ {
+		p.taskChan <- nil
+	}
+	p.wg.Wait()
+	localWorkerPoolPool.Put(p)
+}
+
+type GraphOption func(*Graph)
+
+func WithCapacity(capacity int) GraphOption {
+	return func(g *Graph) {
+		g.nodes = make(map[string]*Node, capacity)
+		g.edges = make(map[string][]*Edge, capacity)
+		g.inDegree = make(map[string]int, capacity)
+		g.outDegree = make(map[string]int, capacity)
+		g.stepNames = make(map[string]int, capacity)
+	}
+}
+
+func WithLargeGraphThreshold(threshold int) GraphOption {
+	return func(g *Graph) {
+		if threshold > 0 {
+			g.largeThreshold = threshold
+		}
+	}
+}
+
+func NewGraph(opts ...GraphOption) *Graph {
+	g := &Graph{
+		nodes:     make(map[string]*Node, 16),
+		edges:     make(map[string][]*Edge, 16),
+		inDegree:  make(map[string]int, 16),
+		outDegree: make(map[string]int, 16),
+		stepNames: make(map[string]int, 16),
+	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
+}
+
+func (g *Graph) AddNode(name string, fn any) *Graph {
 	if g.err != nil {
 		return g
 	}
@@ -97,11 +321,38 @@ func (g *Graph) addNode(name string, fn any, nodeType NodeType) *Graph {
 		return g
 	}
 
-	node := &Node{
-		name:     name,
-		nodeType: nodeType,
-		status:   NodeStatusPending,
-		fn:       fn,
+	g.execPlanValid = false
+
+	node := nodePool.Get()
+	*node = Node{
+		name:   name,
+		status: NodeStatusPending,
+		fn:     fn,
+	}
+
+	if fn != nil {
+		node.fnValue = reflect.ValueOf(fn)
+		node.fnType = node.fnValue.Type()
+		if node.fnType.Kind() != reflect.Func {
+			g.err = &ChainError{Message: ErrNotFunction}
+			return g
+		}
+		numIn := node.fnType.NumIn()
+		node.argCount = numIn
+		node.argTypes = make([]reflect.Type, numIn)
+		for i := range numIn {
+			node.argTypes[i] = node.fnType.In(i)
+		}
+		if numIn == 1 && node.argTypes[0].Kind() == reflect.Slice {
+			node.sliceArg = true
+			node.sliceElemType = node.argTypes[0].Elem()
+		}
+		node.numOut = node.fnType.NumOut()
+		if node.numOut > 0 {
+			lastOutType := node.fnType.Out(node.numOut - 1)
+			node.hasErrorReturn = lastOutType.Implements(errorType)
+		}
+		node.callFn = g.compileNodeCall(node)
 	}
 
 	g.nodes[name] = node
@@ -111,41 +362,28 @@ func (g *Graph) addNode(name string, fn any, nodeType NodeType) *Graph {
 	return g
 }
 
-func (g *Graph) Node(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeNormal)
-}
+type EdgeOption func(*Edge)
 
-func (g *Graph) StartNode(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeStart)
-}
-
-func (g *Graph) EndNode(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeEnd)
-}
-
-func (g *Graph) BranchNode(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeBranch)
-}
-
-func (g *Graph) ParallelNode(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeParallel)
-}
-
-func (g *Graph) LoopNode(name string, fn any) *Graph {
-	return g.addNode(name, fn, NodeTypeLoop)
-}
-
-func (g *Graph) AddEdge(from, to string) *Graph {
-	return g.AddEdgeWithCondition(from, to, nil)
-}
-
-func (g *Graph) AddEdgeWithCondition(from, to string, cond any) *Graph {
-	if g.err != nil {
-		return g
+func WithEdgeType(t EdgeType) EdgeOption {
+	return func(e *Edge) {
+		e.edgeType = t
 	}
+}
 
-	if from == to {
-		g.err = &ChainError{Message: ErrSelfDependency}
+func WithCondition(cond any) EdgeOption {
+	return func(e *Edge) {
+		e.cond = cond
+	}
+}
+
+func WithMaxIterations(max int) EdgeOption {
+	return func(e *Edge) {
+		e.weight = max
+	}
+}
+
+func (g *Graph) AddEdge(from, to string, opts ...EdgeOption) *Graph {
+	if g.err != nil {
 		return g
 	}
 
@@ -162,104 +400,840 @@ func (g *Graph) AddEdgeWithCondition(from, to string, cond any) *Graph {
 		return g
 	}
 
-	if g.HasCycle(from, to) {
-		g.err = &ChainError{Message: ErrCyclicDependency}
-		return g
+	edge := edgePool.Get()
+	*edge = Edge{
+		from:     from,
+		to:       to,
+		edgeType: EdgeTypeNormal,
 	}
 
-	edge := &Edge{
-		from: from,
-		to:   to,
-		cond: cond,
+	for _, opt := range opts {
+		opt(edge)
+	}
+
+	if edge.cond != nil {
+		edge.condFunc = g.compileCondition(edge.cond)
+	}
+
+	switch edge.edgeType {
+	case EdgeTypeLoop:
+		if from != to {
+			g.err = &ChainError{Message: "loop edge must have same from and to node"}
+			return g
+		}
+		if edge.weight <= 0 {
+			edge.weight = DefaultMaxIterations
+		}
+	case EdgeTypeNormal:
+		if from == to {
+			g.err = &ChainError{Message: ErrSelfDependency}
+			return g
+		}
+		if g.HasCycle(from, to) {
+			g.err = &ChainError{Message: ErrCyclicDependency}
+			return g
+		}
+	default:
+		if from == to {
+			g.err = &ChainError{Message: ErrSelfDependency}
+			return g
+		}
 	}
 
 	g.edges[from] = append(g.edges[from], edge)
-	g.inDegree[to]++
-	g.outDegree[from]++
+	if edge.edgeType == EdgeTypeNormal || edge.edgeType == EdgeTypeBranch {
+		g.inDegree[to]++
+		g.outDegree[from]++
+	}
+	g.execPlanValid = false
 
 	return g
 }
 
-func (g *Graph) HasCycle(from, to string) bool {
-	visited := make(map[string]bool)
-	path := make(map[string]bool)
+func (g *Graph) AddEdgeWithCondition(from, to string, cond any) *Graph {
+	return g.AddEdge(from, to, WithCondition(cond))
+}
 
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
+func (g *Graph) AddLoopEdge(nodeName string, cond any, maxIterations ...int) *Graph {
+	opts := []EdgeOption{WithEdgeType(EdgeTypeLoop), WithCondition(cond)}
+	if len(maxIterations) > 0 && maxIterations[0] > 0 {
+		opts = append(opts, WithMaxIterations(maxIterations[0]))
+	}
+	return g.AddEdge(nodeName, nodeName, opts...)
+}
+
+func (g *Graph) AddBranchEdge(from string, branches map[string]any) *Graph {
+	for to, cond := range branches {
+		g.AddEdge(from, to, WithEdgeType(EdgeTypeBranch), WithCondition(cond))
+		if g.err != nil {
+			return g
+		}
+	}
+	return g
+}
+
+func (g *Graph) HasCycle(from, to string) bool {
+	if g.visited == nil {
+		g.visited = make(map[string]bool, len(g.nodes))
+	} else {
+		clear(g.visited)
+	}
+	visited := g.visited
+
+	if g.path == nil {
+		g.path = make(map[string]bool, len(g.nodes))
+	} else {
+		clear(g.path)
+	}
+	path := g.path
+
+	stack := []string{to}
+	index := 0
+
+	for index >= 0 {
+		node := stack[index]
+
 		if path[node] {
 			return true
 		}
+
 		if visited[node] {
-			return false
+			index--
+			continue
 		}
 
 		path[node] = true
 		visited[node] = true
 
+		hasUnvisited := false
 		for _, edge := range g.edges[node] {
+			if edge.edgeType == EdgeTypeLoop {
+				continue
+			}
 			nextNode := edge.to
-			if nextNode == from || dfs(nextNode) {
+			if nextNode == from {
 				return true
+			}
+			if !visited[nextNode] {
+				stack = append(stack, nextNode)
+				index++
+				hasUnvisited = true
+				break
 			}
 		}
 
-		path[node] = false
+		if !hasUnvisited {
+			path[node] = false
+			index--
+		}
+	}
+
+	return false
+}
+
+func (g *Graph) compileCondition(cond any) CondFunc {
+	if cond == nil {
+		return nil
+	}
+
+	if c, ok := cond.(CondFunc); ok {
+		return c
+	}
+
+	if b, ok := cond.(bool); ok {
+		if b {
+			return nil
+		}
+		return func([]any) bool { return false }
+	}
+
+	fnValue := reflect.ValueOf(cond)
+	fnType := fnValue.Type()
+
+	if fnType.Kind() != reflect.Func {
+		return nil
+	}
+
+	comp := newCondCompiler(cond)
+	return comp.eval
+}
+
+func (g *Graph) compileNodeCall(node *Node) func([]any) ([]any, error) {
+	if node.fn == nil {
+		return func(inputs []any) ([]any, error) {
+			return inputs, nil
+		}
+	}
+
+	fnValue := node.fnValue
+	argCount := node.argCount
+	sliceArg := node.sliceArg
+	sliceElemType := node.sliceElemType
+	hasError := node.hasErrorReturn
+	argTypes := node.argTypes
+
+	return func(inputs []any) ([]any, error) {
+		args := reflectValueSlicePool.Get(argCount)
+		defer reflectValueSlicePool.Put(args)
+
+		if len(inputs) > 0 {
+			if argCount > 0 && len(inputs) == argCount {
+				for i := range len(inputs) {
+					input := inputs[i]
+					if input == nil {
+						args = append(args, reflect.Zero(argTypes[i]))
+						continue
+					}
+					val := reflect.ValueOf(input)
+					if !val.Type().AssignableTo(argTypes[i]) {
+						if val.CanConvert(argTypes[i]) {
+							val = val.Convert(argTypes[i])
+						} else {
+							return nil, &ChainError{Message: ErrArgTypeMismatch}
+						}
+					}
+					args = append(args, val)
+				}
+			} else if sliceArg {
+				sliceValue := reflect.MakeSlice(argTypes[0], len(inputs), len(inputs))
+				for i := range inputs {
+					val := reflect.ValueOf(inputs[i])
+					if !val.Type().AssignableTo(sliceElemType) {
+						if val.CanConvert(sliceElemType) {
+							val = val.Convert(sliceElemType)
+						} else {
+							return nil, &ChainError{Message: ErrArgTypeMismatch}
+						}
+					}
+					sliceValue.Index(i).Set(val)
+				}
+				args = append(args, sliceValue)
+			} else if len(inputs) > 0 {
+				currentValue := inputs[0]
+				currentValueType := reflect.TypeOf(currentValue)
+				currentValueValue := reflect.ValueOf(currentValue)
+
+				if currentValueType == nil {
+					if argCount > 0 {
+						args = append(args, reflect.Zero(argTypes[0]))
+					}
+				} else if currentValueType.Kind() == reflect.Slice || currentValueType.Kind() == reflect.Array {
+					elemCount := currentValueValue.Len()
+					if argCount > 0 && elemCount != argCount {
+						return nil, &ChainError{Message: ErrArgCountMismatch}
+					}
+					for i := range elemCount {
+						elem := currentValueValue.Index(i)
+						if elem.Kind() == reflect.Interface {
+							elem = elem.Elem()
+						}
+						args = append(args, elem)
+					}
+				} else {
+					if argCount > 0 {
+						val := currentValueValue
+						if !val.Type().AssignableTo(argTypes[0]) {
+							if val.CanConvert(argTypes[0]) {
+								val = val.Convert(argTypes[0])
+							} else {
+								return nil, &ChainError{Message: ErrArgTypeMismatch}
+							}
+						}
+						args = append(args, val)
+					}
+				}
+			}
+		}
+
+		if len(args) != argCount {
+			return nil, &ChainError{Message: ErrArgCountMismatch}
+		}
+
+		results := fnValue.Call(args)
+
+		if hasError {
+			errValue := results[len(results)-1]
+			if !errValue.IsNil() {
+				return nil, errValue.Interface().(error)
+			}
+			results = results[:len(results)-1]
+		}
+
+		out := make([]any, len(results))
+		for i, r := range results {
+			out[i] = r.Interface()
+		}
+		return out, nil
+	}
+}
+
+func (g *Graph) executeNodeWithLoop(
+	nodeName string,
+	inputs []any,
+) ([]any, error) {
+	results, err := g.executeNode(nodeName, inputs)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, edge := range g.edges[nodeName] {
+		if edge.from == nodeName && edge.to == nodeName {
+			maxIter := edge.weight
+			if maxIter <= 0 {
+				maxIter = DefaultMaxIterations
+			}
+			for i := 1; i < maxIter; i++ {
+				if edge.condFunc != nil && !edge.condFunc(results) {
+					break
+				}
+				results, err = g.executeNode(nodeName, results)
+				if err != nil {
+					return nil, err
+				}
+			}
+			break
+		}
+	}
+
+	return results, nil
+}
+
+type nodeState struct {
+	results  []any
+	err      error
+	done     uint32
+	finished uint32
+	doneSig  chan struct{}
+}
+
+type execContext struct {
+	graph             *Graph
+	ctx               context.Context
+	plan              []string
+	states            map[string]*nodeState
+	incomingEdges     map[string][]*Edge
+	branchTargetNodes map[string]bool
+	errChan           chan error
+	doneChan          chan struct{}
+	wg                sync.WaitGroup
+}
+
+type nodeTask struct {
+	ctx  *execContext
+	name string
+}
+
+var taskPool = sync.Pool{
+	New: func() any { return &nodeTask{} },
+}
+
+const defaultWorkerCount = 8
+
+type globalWorker struct {
+	taskChan chan *nodeTask
+	wg       sync.WaitGroup
+}
+
+var gw *globalWorker
+var gwOnce sync.Once
+
+func getGlobalWorker() *globalWorker {
+	gwOnce.Do(func() {
+		gw = &globalWorker{
+			taskChan: make(chan *nodeTask, 1024),
+		}
+		for i := 0; i < defaultWorkerCount; i++ {
+			gw.wg.Add(1)
+			go gw.worker()
+		}
+	})
+	return gw
+}
+
+func (w *globalWorker) worker() {
+	defer w.wg.Done()
+	for task := range w.taskChan {
+		if task == nil {
+			return
+		}
+		executeNodeWorkerTask(task)
+		taskPool.Put(task)
+	}
+}
+
+func (w *globalWorker) Submit(task *nodeTask) {
+	w.taskChan <- task
+}
+
+func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
+	nodeCount := len(g.nodes)
+
+	threshold := largeGraphThreshold
+	if g.largeThreshold > 0 {
+		threshold = g.largeThreshold
+	}
+
+	if nodeCount >= threshold {
+		return g.executeGraphParallelLarge(ctx)
+	}
+
+	return g.executeGraphParallelSmall(ctx)
+}
+
+func (g *Graph) executeGraphParallelSmall(ctx context.Context) error {
+	plan, err := g.buildExecutionPlan()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+	default:
+	}
+
+	allEdges := g.edges
+
+	var incomingEdges map[string][]*Edge
+	if g.execInEdges != nil && g.execPlanValid {
+		incomingEdges = g.execInEdges
+	} else {
+		if g.execInEdges == nil {
+			g.execInEdges = make(map[string][]*Edge, len(allEdges))
+		} else {
+			clear(g.execInEdges)
+		}
+		for _, edges := range allEdges {
+			for _, edge := range edges {
+				g.execInEdges[edge.to] = append(g.execInEdges[edge.to], edge)
+			}
+		}
+		incomingEdges = g.execInEdges
+	}
+
+	if g.execStates == nil {
+		g.execStates = make(map[string]*nodeState, len(plan))
+	} else {
+		clear(g.execStates)
+	}
+	states := g.execStates
+	for _, name := range plan {
+		state := nodeStatePool.Get()
+		state.doneSig = make(chan struct{}, 1)
+		states[name] = state
+	}
+
+	errChan := make(chan error, 1)
+	doneChan := make(chan struct{}, len(plan))
+
+	execCtx := &execContext{
+		graph:             g,
+		ctx:               ctx,
+		plan:              plan,
+		states:            states,
+		incomingEdges:     incomingEdges,
+		branchTargetNodes: g.branchTargetNodes,
+		errChan:           errChan,
+		doneChan:          doneChan,
+	}
+
+	worker := getGlobalWorker()
+
+	go func() {
+		for _, nodeName := range plan {
+			task := taskPool.Get().(*nodeTask)
+			task.ctx = execCtx
+			task.name = nodeName
+			worker.Submit(task)
+		}
+	}()
+
+	var execErr error
+	total := len(plan)
+	completed := 0
+	for completed < total {
+		select {
+		case <-ctx.Done():
+			execErr = &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+			return execErr
+		case err := <-errChan:
+			execErr = err
+			return execErr
+		case <-doneChan:
+			completed++
+		}
+	}
+
+	for _, state := range states {
+		nodeStatePool.Put(state)
+	}
+
+	return execErr
+}
+
+func (g *Graph) executeGraphParallelLarge(ctx context.Context) error {
+	layers, err := g.buildLayers()
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+	default:
+	}
+
+	allEdges := g.edges
+	nodeCount := len(g.nodes)
+
+	var incomingEdges map[string][]*Edge
+	if g.execInEdges != nil && g.layersValid {
+		incomingEdges = g.execInEdges
+	} else {
+		if g.execInEdges == nil {
+			g.execInEdges = make(map[string][]*Edge, len(allEdges))
+		} else {
+			clear(g.execInEdges)
+		}
+		for _, edges := range allEdges {
+			for _, edge := range edges {
+				g.execInEdges[edge.to] = append(g.execInEdges[edge.to], edge)
+			}
+		}
+		incomingEdges = g.execInEdges
+	}
+
+	if g.execStates == nil {
+		g.execStates = make(map[string]*nodeState, nodeCount)
+	} else {
+		clear(g.execStates)
+	}
+	states := g.execStates
+	for _, layer := range layers {
+		for _, name := range layer {
+			state := nodeStatePool.Get()
+			state.doneSig = make(chan struct{}, 1)
+			states[name] = state
+		}
+	}
+
+	errChan := make(chan error, 1)
+	layerDone := make(chan struct{}, nodeCount)
+
+	execCtx := &execContext{
+		graph:             g,
+		ctx:               ctx,
+		plan:              nil,
+		states:            states,
+		incomingEdges:     incomingEdges,
+		branchTargetNodes: g.branchTargetNodes,
+		errChan:           errChan,
+		doneChan:          layerDone,
+	}
+
+	workerCount := defaultWorkerCount
+	if nodeCount < workerCount {
+		workerCount = nodeCount
+	}
+	pool := newLocalWorkerPool(workerCount)
+	defer pool.Shutdown()
+
+	var execErr error
+
+	for _, layer := range layers {
+		select {
+		case <-ctx.Done():
+			return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+		case err := <-errChan:
+			execErr = err
+			return execErr
+		default:
+		}
+
+		for _, nodeName := range layer {
+			task := taskPool.Get().(*nodeTask)
+			task.ctx = execCtx
+			task.name = nodeName
+			pool.Submit(task)
+		}
+
+		layerTotal := len(layer)
+		layerCompleted := 0
+		for layerCompleted < layerTotal {
+			select {
+			case <-ctx.Done():
+				return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+			case err := <-errChan:
+				execErr = err
+				return execErr
+			case <-layerDone:
+				layerCompleted++
+			}
+		}
+	}
+
+	for _, state := range states {
+		nodeStatePool.Put(state)
+	}
+
+	return execErr
+}
+
+func waitForDone(state *nodeState, ctx context.Context) bool {
+	if atomic.LoadUint32(&state.done) != 0 {
+		return true
+	}
+	select {
+	case <-state.doneSig:
+		return true
+	case <-ctx.Done():
 		return false
 	}
-
-	return dfs(to)
 }
 
-func (g *Graph) FindStartNode() string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func executeNodeWorkerTask(task *nodeTask) {
+	ctx := task.ctx
+	name := task.name
 
-	for name, node := range g.nodes {
-		if node.nodeType == NodeTypeStart {
-			return name
+	state := ctx.states[name]
+	inEdges := ctx.incomingEdges[name]
+	var inputs []any
+	var hasValidInput bool
+
+	defer func() {
+		atomic.StoreUint32(&state.done, 1)
+		close(state.doneSig)
+		if ctx.doneChan != nil {
+			select {
+			case ctx.doneChan <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	if len(inEdges) == 0 {
+		hasValidInput = true
+	} else {
+		inputsBuf := anySlicePool.Get(16)
+		defer anySlicePool.Put(inputsBuf)
+
+		branchTargetNodes := ctx.branchTargetNodes
+
+		completedCount := 0
+		requiredCount := 0
+		normalEdges := 0
+		for _, edge := range inEdges {
+			if edge.edgeType == EdgeTypeLoop {
+				continue
+			}
+			requiredCount++
+			if branchTargetNodes[edge.from] {
+				requiredCount--
+			} else {
+				normalEdges++
+			}
+		}
+
+		if normalEdges > 0 {
+			for _, edge := range inEdges {
+				if edge.edgeType == EdgeTypeLoop {
+					continue
+				}
+				if branchTargetNodes[edge.from] {
+					continue
+				}
+				fromState := ctx.states[edge.from]
+				if !waitForDone(fromState, ctx.ctx) {
+					return
+				}
+				if fromState.err != nil {
+					select {
+					case ctx.errChan <- fromState.err:
+					default:
+					}
+					return
+				}
+				if edge.condFunc == nil || edge.condFunc(fromState.results) {
+					inputsBuf = append(inputsBuf, fromState.results...)
+					completedCount++
+				}
+			}
+		}
+
+		for _, edge := range inEdges {
+			if edge.edgeType == EdgeTypeLoop {
+				continue
+			}
+			if !branchTargetNodes[edge.from] {
+				continue
+			}
+			fromState := ctx.states[edge.from]
+			if !waitForDone(fromState, ctx.ctx) {
+				return
+			}
+			if fromState.err != nil {
+				select {
+				case ctx.errChan <- fromState.err:
+				default:
+				}
+				return
+			}
+			if len(fromState.results) > 0 {
+				inputsBuf = append(inputsBuf, fromState.results...)
+				completedCount++
+				break
+			}
+		}
+
+		if requiredCount == 0 || completedCount >= requiredCount {
+			hasValidInput = true
+			inputs = make([]any, len(inputsBuf))
+			copy(inputs, inputsBuf)
 		}
 	}
 
-	for name := range g.nodes {
-		if g.inDegree[name] == 0 {
-			return name
-		}
+	if !hasValidInput {
+		return
 	}
 
-	return ""
+	results, execErr := ctx.graph.executeNodeWithLoop(name, inputs)
+	if execErr != nil {
+		state.err = &ChainError{Message: fmt.Sprintf("node %s failed: %v", name, execErr)}
+		select {
+		case ctx.errChan <- state.err:
+		default:
+		}
+		return
+	}
+
+	state.results = results
+	ctx.graph.mu.Lock()
+	ctx.graph.stepNames[name] = len(ctx.graph.stepNames)
+	ctx.graph.mu.Unlock()
 }
 
-func (g *Graph) FindEndNodes() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+func (g *Graph) Run() error {
+	if g.err != nil {
+		return g.err
+	}
+	return g.RunWithContext(context.Background())
+}
 
-	var endNodes []string
-
-	for name, node := range g.nodes {
-		if node.nodeType == NodeTypeEnd {
-			endNodes = append(endNodes, name)
-			continue
-		}
-		if g.outDegree[name] == 0 {
-			endNodes = append(endNodes, name)
-		}
+func (g *Graph) RunWithContext(ctx context.Context) error {
+	if g.err != nil {
+		return g.err
 	}
 
-	return endNodes
+	return g.executeGraphParallelWithContext(ctx)
+}
+
+func (g *Graph) RunSequential() error {
+	if g.err != nil {
+		return g.err
+	}
+	return g.RunSequentialWithContext(context.Background())
+}
+
+func (g *Graph) RunSequentialWithContext(ctx context.Context) error {
+	if g.err != nil {
+		return g.err
+	}
+
+	plan, err := g.buildExecutionPlan()
+	if err != nil {
+		return err
+	}
+
+	return g.executeSequential(ctx, plan)
+}
+
+func (g *Graph) executeSequential(ctx context.Context, plan []string) error {
+	resultsMap := make(map[string][]any, len(plan))
+
+	for _, name := range plan {
+		select {
+		case <-ctx.Done():
+			return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+		default:
+		}
+
+		node := g.nodes[name]
+		if node == nil {
+			return &ChainError{Message: ErrNodeNotFound}
+		}
+
+		inEdges := g.execInEdges[name]
+		var inputs []any
+
+		if len(inEdges) == 0 {
+			inputs = nil
+		} else {
+			for _, edge := range inEdges {
+				if edge.edgeType == EdgeTypeLoop {
+					continue
+				}
+				if fromResults, ok := resultsMap[edge.from]; ok {
+					inputs = append(inputs, fromResults...)
+				}
+			}
+		}
+
+		results, err := g.executeNodeWithLoop(name, inputs)
+		if err != nil {
+			return &ChainError{Message: fmt.Sprintf("node %s failed: %v", name, err)}
+		}
+
+		resultsMap[name] = results
+		g.mu.Lock()
+		g.stepNames[name] = len(g.stepNames)
+		g.mu.Unlock()
+	}
+
+	return nil
 }
 
 func (g *Graph) buildExecutionPlan() ([]string, error) {
-	plan := make([]string, 0)
-	visited := make(map[string]bool)
-	queue := make([]string, 0)
+	if g.execPlanValid && len(g.execPlan) > 0 {
+		return g.execPlan, nil
+	}
 
-	startNode := g.FindStartNode()
+	nodeCount := len(g.nodes)
+
+	if g.tempInDegree == nil {
+		g.tempInDegree = make(map[string]int, nodeCount)
+	} else {
+		clear(g.tempInDegree)
+	}
+	tempInDegree := g.tempInDegree
+	for name := range g.nodes {
+		tempInDegree[name] = 0
+	}
+	for _, edges := range g.edges {
+		for _, edge := range edges {
+			if edge.edgeType == EdgeTypeNormal || edge.edgeType == EdgeTypeBranch {
+				tempInDegree[edge.to]++
+			}
+		}
+	}
+
+	if g.visited == nil {
+		g.visited = make(map[string]bool, nodeCount)
+	} else {
+		clear(g.visited)
+	}
+	visited := g.visited
+
+	plan := stringSlicePool.Get(nodeCount)
+
+	startNode := g.findStartNode()
 	if startNode == "" {
+		stringSlicePool.Put(plan)
 		return nil, &ChainError{Message: ErrNoStartNode}
 	}
 
-	for name, inDegree := range g.inDegree {
-		if inDegree == 0 {
+	queue := stringSlicePool.Get(nodeCount)
+	for name, degree := range tempInDegree {
+		if degree == 0 {
 			queue = append(queue, name)
 		}
 	}
@@ -268,14 +1242,10 @@ func (g *Graph) buildExecutionPlan() ([]string, error) {
 		queue = append(queue, startNode)
 	}
 
-	tempInDegree := make(map[string]int)
-	for name, degree := range g.inDegree {
-		tempInDegree[name] = degree
-	}
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	head := 0
+	for head < len(queue) {
+		current := queue[head]
+		head++
 
 		if visited[current] {
 			continue
@@ -285,6 +1255,9 @@ func (g *Graph) buildExecutionPlan() ([]string, error) {
 		visited[current] = true
 
 		for _, edge := range g.edges[current] {
+			if edge.edgeType == EdgeTypeLoop {
+				continue
+			}
 			nextNode := edge.to
 			tempInDegree[nextNode]--
 			if tempInDegree[nextNode] == 0 {
@@ -293,444 +1266,176 @@ func (g *Graph) buildExecutionPlan() ([]string, error) {
 		}
 	}
 
-	if len(plan) != len(g.nodes) {
+	stringSlicePool.Put(queue)
+
+	if len(plan) != nodeCount {
+		stringSlicePool.Put(plan)
 		return nil, &ChainError{Message: ErrCyclicDependency}
 	}
 
-	return plan, nil
+	g.execPlan = append(g.execPlan[:0], plan...)
+	g.execPlanValid = true
+
+	if g.branchTargetNodes == nil {
+		g.branchTargetNodes = make(map[string]bool, nodeCount)
+	} else {
+		clear(g.branchTargetNodes)
+	}
+	for _, edges := range g.edges {
+		for _, e := range edges {
+			if e.edgeType == EdgeTypeBranch {
+				g.branchTargetNodes[e.to] = true
+			}
+		}
+	}
+
+	stringSlicePool.Put(plan)
+
+	return g.execPlan, nil
 }
 
-func (g *Graph) evaluateCondition(cond any, results []any) bool {
-	if cond == nil {
-		return true
-	}
-
-	fnValue := reflect.ValueOf(cond)
-	fnType := fnValue.Type()
-
-	if fnType.Kind() != reflect.Func {
-		val := cond
-		if b, ok := val.(bool); ok {
-			return b
-		}
-		return true
-	}
-
-	var args []reflect.Value
-	argCount := fnType.NumIn()
-
-	// Prepare arguments for condition function
-	if len(results) > 0 {
-		if fnType.IsVariadic() {
-			// Variadic function: need to handle differently
-			if len(results) > 0 {
-				// Check if we need to convert to variadic type
-				sliceType := fnType.In(argCount - 1).Elem()
-				slice := reflect.MakeSlice(reflect.SliceOf(sliceType), 0, len(results))
-				for _, result := range results {
-					slice = reflect.Append(slice, reflect.ValueOf(result))
-				}
-				args = append(args, slice)
-			}
-		} else if argCount == 1 {
-			// Single parameter function: pass first result (if available)
-			args = append(args, reflect.ValueOf(results[0]))
-		} else if argCount == len(results) {
-			// Multi-parameter function with matching argument count: pass all results
-			for _, result := range results {
-				args = append(args, reflect.ValueOf(result))
-			}
-		} else if argCount > len(results) {
-			// Function expects more parameters: fill missing parameters with nil
-			for _, result := range results {
-				args = append(args, reflect.ValueOf(result))
-			}
-			for i := len(results); i < argCount; i++ {
-				args = append(args, reflect.Zero(fnType.In(i)))
-			}
-		} else {
-			// Function expects fewer parameters: only pass first N results
-			for i := range argCount {
-				args = append(args, reflect.ValueOf(results[i]))
-			}
-		}
-	} else if argCount > 0 {
-		// No results but function expects parameters: fill all parameters with nil
-		for i := range argCount {
-			args = append(args, reflect.Zero(fnType.In(i)))
+func (g *Graph) findStartNode() string {
+	for name := range g.nodes {
+		if g.inDegree[name] == 0 {
+			return name
 		}
 	}
 
-	// Call condition function
-	var condResult []reflect.Value
-	if fnType.IsVariadic() {
-		condResult = fnValue.CallSlice(args)
+	return ""
+}
+
+func (g *Graph) buildLayers() ([][]string, error) {
+	if g.layersValid && len(g.layers) > 0 {
+		return g.layers, nil
+	}
+
+	nodeCount := len(g.nodes)
+
+	if g.tempInDegree == nil {
+		g.tempInDegree = make(map[string]int, nodeCount)
 	} else {
-		condResult = fnValue.Call(args)
+		clear(g.tempInDegree)
 	}
-
-	// Process return results
-	if len(condResult) > 0 {
-		if condResult[0].Kind() == reflect.Bool {
-			return condResult[0].Bool()
-		} else if condResult[0].Kind() == reflect.Interface {
-			// Handle case where return type is interface
-			if !condResult[0].IsNil() {
-				if b, ok := condResult[0].Elem().Interface().(bool); ok {
-					return b
-				}
+	tempInDegree := g.tempInDegree
+	for name := range g.nodes {
+		tempInDegree[name] = 0
+	}
+	for _, edges := range g.edges {
+		for _, edge := range edges {
+			if edge.edgeType == EdgeTypeNormal || edge.edgeType == EdgeTypeBranch {
+				tempInDegree[edge.to]++
 			}
 		}
 	}
 
-	// Default return true
-	return true
+	if g.visited == nil {
+		g.visited = make(map[string]bool, nodeCount)
+	} else {
+		clear(g.visited)
+	}
+	visited := g.visited
+
+	allNodes := stringSlicePool.Get(nodeCount)
+	allNodes = allNodes[:0]
+
+	layerBounds := make([]int, 0, 16)
+	layerBounds = append(layerBounds, 0)
+
+	for name, degree := range tempInDegree {
+		if degree == 0 {
+			allNodes = append(allNodes, name)
+		}
+	}
+
+	if len(allNodes) == 0 {
+		startNode := g.findStartNode()
+		if startNode == "" {
+			stringSlicePool.Put(allNodes)
+			return nil, &ChainError{Message: ErrNoStartNode}
+		}
+		allNodes = append(allNodes, startNode)
+	}
+
+	layerStart := 0
+	layerEnd := len(allNodes)
+	totalProcessed := 0
+
+	for layerStart < layerEnd {
+		for i := layerStart; i < layerEnd; i++ {
+			node := allNodes[i]
+			visited[node] = true
+			for _, edge := range g.edges[node] {
+				if edge.edgeType == EdgeTypeLoop {
+					continue
+				}
+				nextNode := edge.to
+				tempInDegree[nextNode]--
+				if tempInDegree[nextNode] == 0 && !visited[nextNode] {
+					allNodes = append(allNodes, nextNode)
+				}
+			}
+		}
+
+		totalProcessed += layerEnd - layerStart
+		layerBounds = append(layerBounds, len(allNodes))
+		layerStart = layerEnd
+		layerEnd = len(allNodes)
+	}
+
+	if totalProcessed != nodeCount {
+		stringSlicePool.Put(allNodes)
+		return nil, &ChainError{Message: ErrCyclicDependency}
+	}
+
+	layerCount := len(layerBounds) - 1
+	if g.layers == nil {
+		g.layers = make([][]string, 0, layerCount)
+	} else {
+		for _, layer := range g.layers {
+			stringSlicePool.Put(layer)
+		}
+		g.layers = g.layers[:0]
+	}
+
+	for i := 0; i < layerCount; i++ {
+		start := layerBounds[i]
+		end := layerBounds[i+1]
+		layerSize := end - start
+		layer := stringSlicePool.Get(layerSize)
+		layer = layer[:0]
+		layer = append(layer, allNodes[start:end]...)
+		g.layers = append(g.layers, layer)
+	}
+
+	stringSlicePool.Put(allNodes)
+	g.layersValid = true
+
+	return g.layers, nil
 }
 
 func (g *Graph) executeNode(nodeName string, inputs []any) ([]any, error) {
-	node, exists := g.nodes[nodeName]
-	if !exists {
+	node := g.nodes[nodeName]
+	if node == nil {
 		return nil, &ChainError{Message: ErrNodeNotFound}
 	}
 
 	node.status = NodeStatusRunning
 	node.err = nil
-	node.result = nil
 
-	if node.fn == nil {
-		node.status = NodeStatusCompleted
-		return inputs, nil
-	}
-
-	fnValue := reflect.ValueOf(node.fn)
-	fnType := fnValue.Type()
-
-	if fnType.Kind() != reflect.Func {
-		return nil, &ChainError{Message: ErrNotFunction}
-	}
-
-	// Convert nil inputs to empty slice
-	if inputs == nil {
-		inputs = make([]any, 0)
-	}
-
-	args, err := prepareArgs(inputs, fnType)
-	if err != nil {
-		node.err = err
-		node.status = NodeStatusFailed
-		return nil, err
-	}
-
-	results := fnValue.Call(args)
-
-	if len(results) > fnType.NumOut() {
-		node.err = &ChainError{Message: ErrFunctionPanicked}
-		node.status = NodeStatusFailed
-		return nil, node.err
-	}
-
-	node.result = make([]any, 0, len(results))
-	for _, result := range results {
-		node.result = append(node.result, result.Interface())
-	}
-
-	if fnType.NumOut() > 1 {
-		lastOutType := fnType.Out(fnType.NumOut() - 1)
-		if lastOutType.Implements(reflect.TypeOf((*error)(nil)).Elem()) {
-			if len(results) == fnType.NumOut() {
-				errValue := results[fnType.NumOut()-1]
-				if !errValue.IsNil() {
-					node.err = errValue.Interface().(error)
-					node.status = NodeStatusFailed
-					return nil, node.err
-				}
-			}
+	if node.callFn != nil {
+		results, err := node.callFn(inputs)
+		if err != nil {
+			node.err = err
+			node.status = NodeStatusFailed
+			return nil, err
 		}
+		node.result = results
+		node.status = NodeStatusCompleted
+		return results, nil
 	}
 
 	node.status = NodeStatusCompleted
-	return node.result, nil
-}
-
-func (g *Graph) executeGraphSequential() error {
-	plan, err := g.buildExecutionPlan()
-	if err != nil {
-		return err
-	}
-
-	nodeResults := make(map[string][]any)
-
-	for _, nodeName := range plan {
-		var inputs []any
-		var executed bool
-
-		for fromName, edges := range g.edges {
-			for _, edge := range edges {
-				if edge.to == nodeName {
-					if results, ok := nodeResults[fromName]; ok {
-						if g.evaluateCondition(edge.cond, results) {
-							// Always pass all results because executeNode uses prepareArgs to handle parameter counting
-							inputs = append(inputs, results...)
-							executed = true
-							break
-						}
-					}
-				}
-			}
-			if executed {
-				break
-			}
-		}
-
-		// Execute node even if no edges are found (start node)
-		if g.inDegree[nodeName] == 0 {
-			executed = true
-		}
-
-		if executed {
-			results, err := g.executeNode(nodeName, inputs)
-			if err != nil {
-				return err
-			}
-
-			nodeResults[nodeName] = results
-			g.stepNames[nodeName] = len(g.stepNames)
-		}
-	}
-
-	return nil
-}
-
-func (g *Graph) executeGraphParallel() error {
-	ctx := context.Background()
-	return g.executeGraphParallelWithContext(ctx)
-}
-
-func (g *Graph) executeGraphParallelWithContext(ctx context.Context) error {
-	plan, err := g.buildExecutionPlan()
-	if err != nil {
-		return err
-	}
-
-	nodeResults := make(map[string][]any)
-	nodeExecuted := make(map[string]bool)
-	nodeFailed := make(map[string]bool)
-	nodeRunning := make(map[string]bool)
-	var mu sync.RWMutex
-
-	type step struct {
-		nodeName   string
-		retryCount int
-	}
-
-	maxRetries := 1000
-	queue := []step{}
-	for _, nodeName := range plan {
-		queue = append(queue, step{nodeName: nodeName, retryCount: 0})
-	}
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(plan))
-
-	for len(queue) > 0 {
-		select {
-		case <-ctx.Done():
-			return &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
-		default:
-		}
-
-		select {
-		case err := <-errChan:
-			wg.Wait()
-			close(errChan)
-			return err
-		default:
-		}
-
-		stepItem := queue[0]
-		queue = queue[1:]
-
-		mu.RLock()
-		executed := nodeExecuted[stepItem.nodeName]
-		failed := nodeFailed[stepItem.nodeName]
-		running := nodeRunning[stepItem.nodeName]
-		mu.RUnlock()
-
-		if executed || failed {
-			continue
-		}
-
-		if running {
-			queue = append(queue, stepItem)
-			continue
-		}
-
-		if stepItem.retryCount > maxRetries {
-			return &ChainError{Message: fmt.Sprintf("node %s exceeded max retries: %d", stepItem.nodeName, maxRetries)}
-		}
-
-		canExecute := false
-		var inputs []any
-
-		if g.inDegree[stepItem.nodeName] == 0 {
-			canExecute = true
-		} else {
-			allDependenciesMet := true
-			dependencyFailed := false
-			dependencySkipped := false
-			hasValidEdge := false
-			var validInputs []any
-
-			var incomingEdges []*Edge
-			for _, edges := range g.edges {
-				for _, edge := range edges {
-					if edge.to == stepItem.nodeName {
-						incomingEdges = append(incomingEdges, edge)
-					}
-				}
-			}
-
-			for _, edge := range incomingEdges {
-				mu.RLock()
-				fromFailed := nodeFailed[edge.from]
-				fromExecuted := nodeExecuted[edge.from]
-				hasResult := nodeResults[edge.from] != nil
-				mu.RUnlock()
-
-				if fromFailed {
-					dependencyFailed = true
-					break
-				}
-
-				if fromExecuted && !hasResult {
-					dependencySkipped = true
-					break
-				}
-
-				if !hasResult {
-					allDependenciesMet = false
-					break
-				}
-
-				mu.RLock()
-				results := nodeResults[edge.from]
-				mu.RUnlock()
-
-				if g.evaluateCondition(edge.cond, results) {
-					hasValidEdge = true
-					validInputs = append(validInputs, results...)
-				}
-			}
-
-			if dependencyFailed {
-				mu.Lock()
-				nodeFailed[stepItem.nodeName] = true
-				mu.Unlock()
-				continue
-			}
-
-			if dependencySkipped {
-				mu.Lock()
-				nodeExecuted[stepItem.nodeName] = true
-				mu.Unlock()
-				continue
-			}
-
-			if allDependenciesMet && hasValidEdge {
-				canExecute = true
-				inputs = validInputs
-			} else if allDependenciesMet && !hasValidEdge {
-				mu.Lock()
-				nodeExecuted[stepItem.nodeName] = true
-				mu.Unlock()
-				continue
-			}
-		}
-
-		if !canExecute {
-			if stepItem.retryCount%10 == 0 {
-				time.Sleep(1 * time.Millisecond)
-			}
-			stepItem.retryCount++
-			queue = append(queue, stepItem)
-			continue
-		}
-
-		mu.Lock()
-		nodeRunning[stepItem.nodeName] = true
-		mu.Unlock()
-		wg.Add(1)
-		go func(nodeName string, inputs []any) {
-			defer wg.Done()
-			defer func() {
-				mu.Lock()
-				nodeRunning[nodeName] = false
-				mu.Unlock()
-			}()
-
-			results, err := g.executeNode(nodeName, inputs)
-			if err != nil {
-				mu.Lock()
-				nodeFailed[nodeName] = true
-				mu.Unlock()
-				errChan <- &ChainError{Message: fmt.Sprintf("node %s failed: %v", nodeName, err)}
-				return
-			}
-
-			mu.Lock()
-			nodeExecuted[nodeName] = true
-			nodeResults[nodeName] = results
-			g.stepNames[nodeName] = len(g.stepNames)
-			mu.Unlock()
-		}(stepItem.nodeName, inputs)
-	}
-
-	wg.Wait()
-	close(errChan)
-
-	if len(errChan) > 0 {
-		if err := <-errChan; err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (g *Graph) Run() error {
-	return g.RunSequential()
-}
-
-func (g *Graph) RunSequential() error {
-	if g.err != nil {
-		return g.err
-	}
-
-	return g.executeGraphSequential()
-}
-
-func (g *Graph) RunParallel() error {
-	if g.err != nil {
-		return g.err
-	}
-
-	return g.executeGraphParallel()
-}
-
-func (g *Graph) RunParallelWithContext(ctx context.Context) error {
-	if g.err != nil {
-		return g.err
-	}
-
-	return g.executeGraphParallelWithContext(ctx)
-}
-
-func (g *Graph) RunWithStrategy(strategy func() error) error {
-	if g.err != nil {
-		return g.err
-	}
-
-	return strategy()
+	return inputs, nil
 }
 
 func (g *Graph) NodeStatus(name string) NodeStatus {
@@ -780,6 +1485,15 @@ func (g *Graph) ClearStatus() *Graph {
 		node.result = nil
 	}
 
+	for _, edges := range g.edges {
+		for _, edge := range edges {
+			if edge.condComp != nil {
+				condCompilerPool.Put(edge.condComp)
+				edge.condComp = nil
+			}
+		}
+	}
+
 	g.err = nil
 	return g
 }
@@ -790,23 +1504,8 @@ func (g *Graph) String() string {
 	sb.WriteString("digraph Graph {\n")
 	sb.WriteString("    rankdir=TD;\n\n")
 
-	for name, node := range g.nodes {
-		style := ""
-		switch node.nodeType {
-		case NodeTypeStart:
-			style = "shape=circle,fillcolor=green,style=filled"
-		case NodeTypeEnd:
-			style = "shape=doublecircle,fillcolor=red,style=filled"
-		case NodeTypeBranch:
-			style = "shape=diamond,fillcolor=yellow,style=filled"
-		case NodeTypeParallel:
-			style = "shape=box,fillcolor=cyan,style=filled"
-		case NodeTypeLoop:
-			style = "shape=oval,fillcolor=orange,style=filled"
-		default:
-			style = "shape=box"
-		}
-		fmt.Fprintf(&sb, "    %q [%s,label=%q];\n", name, style, name)
+	for name := range g.nodes {
+		fmt.Fprintf(&sb, "    %q [shape=box,label=%q];\n", name, name)
 	}
 
 	sb.WriteString("\n")

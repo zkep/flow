@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 )
@@ -13,25 +14,33 @@ const (
 	ErrStepNotFound     = "step not found"
 )
 
-type task struct {
-	name   string
-	fn     any
-	values []any
-	do     bool
-}
+var (
+	errorType = reflect.TypeOf((*error)(nil)).Elem()
+	argsPool  = NewSlicePool[reflect.Value](128, 32)
+)
 
-type Chain struct {
-	err       error
-	values    []any
-	stepNames map[string]int
-	handlers  []*task
-}
+type (
+	task struct {
+		name     string
+		values   []reflect.Value
+		fnValue  reflect.Value
+		argTypes []reflect.Type
+		do       bool
+	}
+
+	Chain struct {
+		err       error
+		values    []reflect.Value
+		stepNames map[string]int
+		handlers  []*task
+	}
+)
 
 func NewChain() *Chain {
 	return &Chain{
-		values:    make([]any, 0),
-		stepNames: make(map[string]int),
-		handlers:  make([]*task, 0),
+		values:    make([]reflect.Value, 0, 8),
+		stepNames: make(map[string]int, 8),
+		handlers:  make([]*task, 0, 8),
 	}
 }
 
@@ -39,8 +48,24 @@ func (c *Chain) Add(name string, fn any) *Chain {
 	if c.err != nil {
 		return c
 	}
+	fnValue := reflect.ValueOf(fn)
+	fnType := fnValue.Type()
+	var argTypes []reflect.Type
+	var values []reflect.Value
+	var t task
+	if fnType.Kind() == reflect.Func {
+		argCount := fnType.NumIn()
+		argTypes = make([]reflect.Type, argCount)
+		for i := range argCount {
+			argTypes[i] = fnType.In(i)
+		}
+	} else {
+		argTypes = []reflect.Type{fnType}
+		values = []reflect.Value{fnValue}
+	}
+	t = task{name: name, fnValue: fnValue, argTypes: argTypes, values: values}
 	c.stepNames[name] = len(c.handlers)
-	c.handlers = append(c.handlers, &task{name: name, fn: fn})
+	c.handlers = append(c.handlers, &t)
 	return c
 }
 
@@ -48,9 +73,22 @@ func (c *Chain) Run() error {
 	if c.err != nil {
 		return c.err
 	}
+	return c.RunWithContext(context.Background())
+}
+
+func (c *Chain) RunWithContext(ctx context.Context) error {
+	if c.err != nil {
+		return c.err
+	}
 	for i := range c.handlers {
 		if !c.handlers[i].do {
-			c.values = c.call(c.handlers[i].fn, c.values)
+			select {
+			case <-ctx.Done():
+				c.err = &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+				return c.err
+			default:
+			}
+			c.values = c.call(c.handlers[i].fnValue, c.handlers[i].argTypes, c.values)
 			if c.err != nil {
 				return c.err
 			}
@@ -61,19 +99,18 @@ func (c *Chain) Run() error {
 	return c.err
 }
 
-func (c *Chain) call(fn any, values []any) []any {
+func (c *Chain) call(fnValue reflect.Value, argTypes []reflect.Type, values []reflect.Value) []reflect.Value {
 	if c.err != nil {
 		return values
 	}
-	fnValue := reflect.ValueOf(fn)
 	fnType := fnValue.Type()
 
 	if fnType.Kind() != reflect.Func {
-		c.handleNonFunctionType(fn, fnValue, fnType)
+		c.handleNonFunctionType(fnValue, fnType)
 		return c.values
 	}
 
-	args, err := prepareArgs(values, fnType)
+	args, err := prepareArgsWithType(values, argTypes)
 	if err != nil {
 		c.err = err
 		return values
@@ -89,60 +126,72 @@ func (c *Chain) call(fn any, values []any) []any {
 		results = fnValue.Call(args)
 	}()
 
+	argsPool.Put(args)
+
 	if c.err != nil {
 		return values
 	}
 
-	if len(results) > fnType.NumOut() {
+	outCount := fnType.NumOut()
+	if len(results) > outCount {
 		c.err = &ChainError{Message: ErrFunctionPanicked}
 		return values
 	}
 
-	newValues := make([]any, 0, len(results))
-	for _, result := range results {
-		newValues = append(newValues, result.Interface())
+	hasError := outCount > 0 && fnType.Out(outCount-1).Implements(errorType)
+	resultCount := len(results)
+	if hasError {
+		resultCount--
 	}
 
-	if fnType.NumOut() > 0 {
-		lastOutType := fnType.Out(fnType.NumOut() - 1)
-		if lastOutType.Implements(reflect.TypeOf((*error)(nil)).Elem()) {
-			if len(results) == fnType.NumOut() {
-				errValue := results[fnType.NumOut()-1]
-				if !errValue.IsNil() {
-					c.err = errValue.Interface().(error)
-				}
+	if resultCount <= 0 {
+		if hasError && len(results) > 0 {
+			errValue := results[len(results)-1]
+			if !errValue.IsNil() {
+				c.err = errValue.Interface().(error)
 			}
-			if len(newValues) > 0 {
-				newValues = newValues[:len(newValues)-1]
-			}
-			if len(newValues) == 0 {
-				return values
-			}
+		}
+		return values
+	}
+
+	newValues := make([]reflect.Value, resultCount)
+	for i := 0; i < resultCount; i++ {
+		newValues[i] = results[i]
+	}
+
+	if hasError && len(results) > resultCount {
+		errValue := results[resultCount]
+		if !errValue.IsNil() {
+			c.err = errValue.Interface().(error)
 		}
 	}
 
 	return newValues
 }
 
-func (c *Chain) handleNonFunctionType(value any, valueReflect reflect.Value, valueType reflect.Type) {
+func (c *Chain) handleNonFunctionType(value reflect.Value, valueType reflect.Type) {
 	if valueType.Kind() == reflect.Slice || valueType.Kind() == reflect.Array {
-		c.values = make([]any, valueReflect.Len())
-		for i := range valueReflect.Len() {
-			elem := valueReflect.Index(i)
+		c.values = make([]reflect.Value, value.Len())
+		for i := range value.Len() {
+			elem := value.Index(i)
 			if elem.Kind() == reflect.Interface {
 				elem = elem.Elem()
 			}
-			c.values[i] = elem.Interface()
+			c.values[i] = elem
 		}
 	} else {
-		c.values = []any{value}
+		c.values = []reflect.Value{value}
 	}
 }
 
 func (c *Chain) Values(name string) ([]any, error) {
 	if idx, ok := c.stepNames[name]; ok {
 		if idx < len(c.handlers) {
-			return c.handlers[idx].values, nil
+			values := make([]any, len(c.handlers[idx].values))
+			for i := range len(c.handlers[idx].values) {
+				values[i] = c.handlers[idx].values[i].Interface()
+			}
+			return values, nil
 		}
 	}
 	return nil, &ChainError{Message: ErrStepNotFound}
@@ -152,7 +201,7 @@ func (c *Chain) Value(name string) (any, error) {
 	if idx, ok := c.stepNames[name]; ok {
 		if idx < len(c.handlers) {
 			if len(c.handlers[idx].values) > 0 {
-				return c.handlers[idx].values[0], nil
+				return c.handlers[idx].values[0].Interface(), nil
 			}
 		}
 	}
@@ -170,7 +219,7 @@ func (c *Chain) Use(names ...string) *Chain {
 
 	newChain := &Chain{
 		err:       c.err,
-		values:    make([]any, 0),
+		values:    make([]reflect.Value, 0),
 		stepNames: make(map[string]int),
 		handlers:  make([]*task, 0),
 	}
@@ -210,45 +259,48 @@ func canConvert(from, to reflect.Type) bool {
 	return false
 }
 
-func addArg(args *[]reflect.Value, val any, argType reflect.Type) error {
-	valValue := reflect.ValueOf(val)
-	if !valValue.IsValid() {
+func addArg(args *[]reflect.Value, val reflect.Value, argType reflect.Type) error {
+	if !val.IsValid() {
 		*args = append(*args, reflect.Zero(argType))
 		return nil
 	}
-	valType := valValue.Type()
-
+	valType := val.Type()
 	if !valType.AssignableTo(argType) {
 		if !canConvert(valType, argType) {
 			return &ChainError{Message: ErrArgTypeMismatch}
 		}
-		*args = append(*args, valValue.Convert(argType))
+		*args = append(*args, val.Convert(argType))
 	} else {
-		*args = append(*args, valValue)
+		*args = append(*args, val)
 	}
 	return nil
 }
 
-func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
-	var args []reflect.Value
-	argCount := fnType.NumIn()
+func prepareArgsWithType(values []reflect.Value, argTypes []reflect.Type) ([]reflect.Value, error) {
+	argCount := len(argTypes)
+	if argCount == 0 {
+		if len(values) > 0 {
+			return nil, &ChainError{Message: ErrArgCountMismatch}
+		}
+		return nil, nil
+	}
 
+	args := argsPool.Get(argCount)
 	if len(values) > 0 {
 		if argCount > 0 && len(values) == argCount {
 			for i := range len(values) {
-				if err := addArg(&args, values[i], fnType.In(i)); err != nil {
+				if err := addArg(&args, values[i], argTypes[i]); err != nil {
+					argsPool.Put(args)
 					return nil, err
 				}
 			}
 		} else {
-			// Check if the first argument is a function with slice parameter
-			if argCount == 1 && fnType.In(0).Kind() == reflect.Slice {
-				// Pass all values as a single slice argument
-				sliceType := fnType.In(0)
+			if argCount == 1 && argTypes[0].Kind() == reflect.Slice {
+				sliceType := argTypes[0]
 				sliceValue := reflect.MakeSlice(sliceType, len(values), len(values))
 				for i := range values {
 					elemType := sliceType.Elem()
-					val := values[i]
+					val := values[i].Interface()
 					valValue := reflect.ValueOf(val)
 
 					if !valValue.IsValid() {
@@ -260,6 +312,7 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 						if valValue.CanConvert(elemType) {
 							valValue = valValue.Convert(elemType)
 						} else {
+							argsPool.Put(args)
 							return nil, &ChainError{Message: ErrArgTypeMismatch}
 						}
 					}
@@ -267,18 +320,18 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 				}
 				args = append(args, sliceValue)
 			} else {
-				// Existing logic for single value or variadic
-				currentValue := values[0]
+				currentValue := values[0].Interface()
 				currentValueType := reflect.TypeOf(currentValue)
 				currentValueValue := reflect.ValueOf(currentValue)
 
 				if currentValueType == nil {
 					if argCount > 0 {
-						args = append(args, reflect.Zero(fnType.In(0)))
+						args = append(args, reflect.Zero(argTypes[0]))
 					}
 				} else if currentValueType.Kind() == reflect.Slice || currentValueType.Kind() == reflect.Array {
 					elemCount := currentValueValue.Len()
 					if argCount > 0 && elemCount != argCount {
+						argsPool.Put(args)
 						return nil, &ChainError{Message: ErrArgCountMismatch}
 					}
 
@@ -291,7 +344,8 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 					}
 				} else {
 					if argCount > 0 {
-						if err := addArg(&args, currentValue, fnType.In(0)); err != nil {
+						if err := addArg(&args, reflect.ValueOf(currentValue), argTypes[0]); err != nil {
+							argsPool.Put(args)
 							return nil, err
 						}
 					}
@@ -301,6 +355,7 @@ func prepareArgs(values []any, fnType reflect.Type) ([]reflect.Value, error) {
 	}
 
 	if len(args) != argCount {
+		argsPool.Put(args)
 		return nil, &ChainError{Message: ErrArgCountMismatch}
 	}
 

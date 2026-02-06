@@ -162,22 +162,22 @@ import (
 func main() {
     g := flow.NewGraph()
 
-    g.StartNode("start", func() int {
+    g.AddNode("start", func() int {
         fmt.Println("Executing start node")
         return 10
     })
 
-    g.Node("process1", func(x int) int {
+    g.AddNode("process1", func(x int) int {
         fmt.Printf("Executing process1: %d * 2 = %d\n", x, x*2)
         return x * 2
     })
 
-    g.Node("process2", func(x int) int {
+    g.AddNode("process2", func(x int) int {
         fmt.Printf("Executing process2: %d + 5 = %d\n", x, x+5)
         return x + 5
     })
 
-    g.EndNode("end1", func(x int) {
+    g.AddNode("end1", func(x int) {
         fmt.Printf("Executing end1 node: Final result is %d\n", x)
     })
 
@@ -255,37 +255,22 @@ graph := flow.NewGraph()
 #### Adding Nodes
 
 ```go
-// Start node
-graph.StartNode("start", func() int {
-    return 42
-})
-
-// Normal node
-graph.Node("process", func(x int) int {
+// Add a node
+graph.AddNode("process", func(x int) int {
     return x * 2
 })
 
-// End node
-graph.EndNode("end", func(result int) {
-    fmt.Println("Result:", result)
+// Node with multiple inputs
+graph.AddNode("combine", func(a, b int) int {
+    return a + b
 })
 
-// Branch node
-graph.BranchNode("branch", func(x int) int {
-    if x > 50 {
-        return 1
+// Node with error return
+graph.AddNode("validate", func(x int) (int, error) {
+    if x < 0 {
+        return 0, fmt.Errorf("invalid value")
     }
-    return 0
-})
-
-// Parallel node
-graph.ParallelNode("parallel", func(x int) int {
-    return x + 10
-})
-
-// Loop node
-graph.LoopNode("loop", func(x int) int {
-    return x - 1
+    return x, nil
 })
 ```
 
@@ -299,20 +284,28 @@ graph.AddEdge("fromNode", "toNode")
 graph.AddEdgeWithCondition("fromNode", "toNode", func(x int) bool {
     return x > 0
 })
+
+// Loop edge (for retry/loop scenarios)
+graph.AddLoopEdge("retryNode", func(result int) bool {
+    return result < 100
+}, 3) // max 3 iterations
+
+// Branch edge (multiple conditional paths)
+graph.AddBranchEdge("decisionNode", map[string]any{
+    "pathA": func(result int) bool { return result > 50 },
+    "pathB": func(result int) bool { return result <= 50 },
+})
 ```
 
 #### Running the Graph
 
 ```go
-// Run sequentially
+// Run the graph
 err := graph.Run()
 
-// Run in parallel
-err := graph.RunParallel()
-
-// Run in parallel with context
+// Run with context
 ctx := context.Background()
-err := graph.RunParallelWithContext(ctx)
+err := graph.RunWithContext(ctx)
 ```
 
 #### Retrieving Node Information
@@ -340,16 +333,13 @@ graphviz := graph.String()
 fmt.Println(graphviz)
 ```
 
-## Node Types
+## Edge Types
 
-| Node Type | Description |
+| Edge Type | Description |
 |-----------|-------------|
-| Start | The starting point of a workflow |
-| End | The ending point of a workflow |
-| Normal | Standard processing node |
-| Branch | Node for conditional branching |
-| Parallel | Node for parallel processing |
-| Loop | Node for loop operations |
+| Normal | Standard edge connecting two nodes |
+| Loop | Edge for loop/retry operations (same source and target node) |
+| Branch | Edge with conditional branching to multiple target nodes |
 
 ## Execution Strategies
 
@@ -364,7 +354,7 @@ Use `AddEdgeWithCondition` to add conditions to edges, allowing for dynamic work
 
 ### Parallel Execution
 
-Use `RunParallel()` or `RunParallelWithContext()` to execute independent nodes concurrently, which can significantly improve performance for workflows with many independent tasks.
+The graph executor automatically handles parallel execution of independent nodes when possible, which can significantly improve performance for workflows with many independent tasks.
 
 ### Error Handling
 
@@ -430,70 +420,86 @@ if err := chain.Run(); err != nil {
 
 ### 2. Business Process Automation
 
-**Scenario**: Automating a customer onboarding process with multiple approval steps
+**Scenario**: Automating a customer onboarding process with credit check, background verification, and approval workflow
 
 **Implementation**: 
 - Use `Graph` to model complex approval workflows
-- Add conditional edges for approval/rejection paths
+- Use `AddLoopEdge` for credit check retries
+- Use `AddBranchEdge` for conditional approval/rejection paths
 - Use parallel execution for independent verification steps
 
 **Example**: 
 ```go
 graph := flow.NewGraph()
 
-// Start with customer information
-graph.StartNode("collectInfo", func() map[string]string {
+// Collect customer information
+graph.AddNode("collectInfo", func() map[string]string {
     return map[string]string{
-        "name": "John Doe",
+        "name":  "John Doe",
         "email": "john@example.com",
         "score": "85",
     }
 })
 
 // Credit check
-graph.Node("creditCheck", func(info map[string]string) bool {
+graph.AddNode("creditCheck", func(info map[string]string) (int, error) {
     score, _ := strconv.Atoi(info["score"])
-    return score > 70
+    fmt.Printf("Credit check: score = %d\n", score)
+    return score, nil
 })
 
-// Background verification (parallel)
-graph.ParallelNode("backgroundCheck", func(info map[string]string) bool {
-    // Simulate background check
+// Retry credit check (loop node)
+graph.AddNode("retryCreditCheck", func(score int) int {
+    fmt.Printf("Retrying credit check, current score: %d\n", score)
+    return score + 5
+})
+// Add loop edge with condition and max iterations
+graph.AddLoopEdge("retryCreditCheck", func(score int) bool {
+    return score < 70
+}, 3)
+
+// Evaluate credit score
+graph.AddNode("evaluateCredit", func(score int) bool {
+    return score >= 70
+})
+
+// Background verification
+graph.AddNode("backgroundCheck", func(info map[string]string) bool {
     time.Sleep(100 * time.Millisecond)
     return true
 })
 
-// Document verification (parallel)
-graph.ParallelNode("documentCheck", func(info map[string]string) bool {
-    // Simulate document verification
+// Document verification
+graph.AddNode("documentCheck", func(info map[string]string) bool {
     time.Sleep(150 * time.Millisecond)
     return true
 })
 
 // Approval decision
-graph.BranchNode("approval", func(creditOk, backgroundOk, documentOk bool) string {
+graph.AddNode("approval", func(creditOk, backgroundOk, documentOk bool) string {
     if creditOk && backgroundOk && documentOk {
         return "approve"
     }
     return "reject"
 })
 
-// Approve path
-graph.Node("sendApproval", func(info map[string]string) {
-    fmt.Printf("Approving customer: %s\n", info["name"])
+// Send approval notification
+graph.AddNode("sendApproval", func(decision string) {
+    fmt.Printf("Approving customer (decision: %s)\n", decision)
 })
 
-// Reject path
-graph.Node("sendRejection", func(info map[string]string) {
-    fmt.Printf("Rejecting customer: %s\n", info["name"])
+// Send rejection notification
+graph.AddNode("sendRejection", func(decision string) {
+    fmt.Printf("Rejecting customer (decision: %s)\n", decision)
 })
 
-// End nodes
-graph.EndNode("onboardingComplete", func() {
+// Onboarding complete
+graph.AddNode("onboardingComplete", func() {
     fmt.Println("Customer onboarding completed successfully")
 })
 
-graph.EndNode("onboardingFailed", func() {
+// Onboarding failed
+graph.AddNode("onboardingFailed", func() {
     fmt.Println("Customer onboarding failed")
 })
 
@@ -501,20 +507,21 @@ graph.EndNode("onboardingFailed", func() {
 graph.AddEdge("collectInfo", "creditCheck")
 graph.AddEdge("collectInfo", "backgroundCheck")
 graph.AddEdge("collectInfo", "documentCheck")
-graph.AddEdge("creditCheck", "approval")
+graph.AddEdge("creditCheck", "retryCreditCheck")
+graph.AddEdge("retryCreditCheck", "evaluateCredit")
+graph.AddEdge("evaluateCredit", "approval")
 graph.AddEdge("backgroundCheck", "approval")
 graph.AddEdge("documentCheck", "approval")
-graph.AddEdgeWithCondition("approval", "sendApproval", func(decision string) bool {
-    return decision == "approve"
-})
-graph.AddEdgeWithCondition("approval", "sendRejection", func(decision string) bool {
-    return decision == "reject"
+// Branch edge for approval/rejection
+graph.AddBranchEdge("approval", map[string]any{
+    "sendApproval":  func(decision string) bool { return decision == "approve" },
+    "sendRejection": func(decision string) bool { return decision == "reject" },
 })
 graph.AddEdge("sendApproval", "onboardingComplete")
 graph.AddEdge("sendRejection", "onboardingFailed")
 
-// Run in parallel for faster execution
-if err := graph.RunParallel(); err != nil {
+// Run the graph
+if err := graph.Run(); err != nil {
     fmt.Printf("Onboarding process failed: %v\n", err)
 }
 ```
@@ -523,42 +530,45 @@ if err := graph.RunParallel(); err != nil {
 
 ```mermaid
 graph TD
-    sendRejection --> onboardingFailed
-    collectInfo --> creditCheck
-    collectInfo --> backgroundCheck
-    collectInfo --> documentCheck
-    creditCheck --> approval
-    backgroundCheck --> approval
     documentCheck --> approval
     approval --> |cond|sendApproval
     approval --> |cond|sendRejection
     sendApproval --> onboardingComplete
+    collectInfo --> creditCheck
+    collectInfo --> backgroundCheck
+    collectInfo --> documentCheck
+    creditCheck --> retryCreditCheck
+    retryCreditCheck --> |cond|retryCreditCheck
+    retryCreditCheck --> evaluateCredit
+    evaluateCredit --> approval
+    backgroundCheck --> approval
+    sendRejection --> onboardingFailed
 ```
 
 ### 3. ETL (Extract, Transform, Load) Workflow
 
-**Scenario**: Extracting data from multiple sources, transforming it, and loading it into a data warehouse
+**Scenario**: Extracting data from multiple sources, validating, transforming, and loading it into appropriate storage based on data value
 
 **Implementation**: 
-- Use `Graph` with parallel execution for data extraction
-- Use `Chain` for sequential transformation steps
+- Use `Graph` with parallel data extraction from multiple sources
+- Use `AddLoopEdge` for data validation retries
+- Use `AddBranchEdge` for conditional loading based on data value
 - Add error handling for data quality issues
 
 **Example**: 
 ```go
 graph := flow.NewGraph()
 
-// Extract data from multiple sources in parallel
-graph.ParallelNode("extractFromAPI", func() []map[string]interface{} {
-    // Extract data from API
+// Extract data from API
+graph.AddNode("extractFromAPI", func() []map[string]interface{} {
     return []map[string]interface{}{
         {"id": 1, "name": "Product A", "price": 100},
         {"id": 2, "name": "Product B", "price": 200},
     }
 })
 
-graph.ParallelNode("extractFromDatabase", func() []map[string]interface{} {
-    // Extract data from database
+// Extract data from database
+graph.AddNode("extractFromDatabase", func() []map[string]interface{} {
     return []map[string]interface{}{
         {"id": 3, "name": "Product C", "price": 150},
         {"id": 4, "name": "Product D", "price": 250},
@@ -566,41 +576,84 @@ graph.ParallelNode("extractFromDatabase", func() []map[string]interface{} {
 })
 
 // Combine extracted data
-graph.Node("combineData", func(apiData, dbData []map[string]interface{}) []map[string]interface{} {
-    combined := append(apiData, dbData...)
-    return combined
+graph.AddNode("combineData", func(apiData, dbData []map[string]interface{}) []map[string]interface{} {
+    return append(apiData, dbData...)
 })
 
+// Validate data
+graph.AddNode("validateData", func(data []map[string]interface{}) (int, []map[string]interface{}) {
+    invalidCount := 0
+    var validData []map[string]interface{}
+    for _, item := range data {
+        price := item["price"].(int)
+        if price > 0 {
+            validData = append(validData, item)
+        } else {
+            invalidCount++
+        }
+    }
+    fmt.Printf("Validated data: %d valid, %d invalid\n", len(validData), invalidCount)
+    return invalidCount, validData
+})
+
+// Retry validation (loop node)
+graph.AddNode("retryValidation", func(countInvalid int, data []map[string]interface{}) (int, []map[string]interface{}) {
+    fmt.Println("Retrying validation...")
+    return countInvalid - 1, data
+})
+graph.AddLoopEdge("retryValidation", func(countInvalid int, data []map[string]interface{}) bool {
+    return countInvalid > 0
+}, 2)
+
 // Transform data
-graph.Node("transformData", func(data []map[string]interface{}) []map[string]interface{} {
+graph.AddNode("transformData", func(data []map[string]interface{}) []map[string]interface{} {
     var transformed []map[string]interface{}
     for _, item := range data {
         price := item["price"].(int)
-        item["priceWithTax"] = price * 1.2 // Add 20% tax
+        item["priceWithTax"] = float64(price) * 1.2
         item["category"] = "General"
         transformed = append(transformed, item)
     }
     return transformed
 })
 
-// Load data
-graph.EndNode("loadToWarehouse", func(data []map[string]interface{}) error {
-    fmt.Printf("Loading %d items to data warehouse\n", len(data))
-    // Load data to warehouse
+// Categorize data by value
+graph.AddNode("categorizeData", func(data []map[string]interface{}) string {
+    totalValue := 0
     for _, item := range data {
-        fmt.Printf("Loading: %v\n", item)
+        totalValue += item["price"].(int)
     }
+    if totalValue > 500 {
+        return "high_value"
+    }
+    return "normal_value"
+})
+
+// Load to warehouse
+graph.AddNode("loadToWarehouse", func(data []map[string]interface{}) error {
+    fmt.Printf("Loading %d items to data warehouse\n", len(data))
+    return nil
+})
+
+// Load to premium storage
+graph.AddNode("loadToPremium", func(data []map[string]interface{}) error {
+    fmt.Printf("Loading %d high-value items to premium storage\n", len(data))
     return nil
 })
 
 // Add edges
 graph.AddEdge("extractFromAPI", "combineData")
 graph.AddEdge("extractFromDatabase", "combineData")
-graph.AddEdge("combineData", "transformData")
-graph.AddEdge("transformData", "loadToWarehouse")
+graph.AddEdge("combineData", "validateData")
+graph.AddEdge("validateData", "retryValidation")
+graph.AddEdge("retryValidation", "transformData")
+graph.AddEdge("transformData", "categorizeData")
+graph.AddBranchEdge("categorizeData", map[string]any{
+    "loadToWarehouse": func(category string) bool { return category == "normal_value" },
+    "loadToPremium":   func(category string) bool { return category == "high_value" },
+})
 
-// Run in parallel
-if err := graph.RunParallel(); err != nil {
+if err := graph.Run(); err != nil {
     fmt.Printf("ETL process failed: %v\n", err)
 }
 ```
@@ -609,113 +662,147 @@ if err := graph.RunParallel(); err != nil {
 
 ```mermaid
 graph TD
+    validateData --> retryValidation
     extractFromAPI --> combineData
+    retryValidation --> |cond|retryValidation
+    retryValidation --> transformData
+    combineData --> validateData
+    transformData --> categorizeData
+    categorizeData --> |cond|loadToWarehouse
+    categorizeData --> |cond|loadToPremium
     extractFromDatabase --> combineData
-    combineData --> transformData
-    transformData --> loadToWarehouse
 ```
 
-### 4. Microservice Orchestration
+### 4. Order Processing
 
-**Scenario**: Coordinating multiple microservices to complete a business transaction
+**Scenario**: Processing customer orders with inventory check, payment processing, and shipping
 
 **Implementation**: 
-- Use `Graph` to model microservice interactions
-- Add compensation nodes for error handling
-- Use parallel execution for independent services
+- Use `Graph` to model order processing workflow
+- Use `AddLoopEdge` for inventory check retries
+- Use `AddBranchEdge` for conditional payment/shipping paths
+- Add compensation nodes for failure handling
 
 **Example**: 
 ```go
 graph := flow.NewGraph()
 
-// Start with order information
-graph.StartNode("createOrder", func() map[string]interface{} {
+// Create order
+graph.AddNode("createOrder", func() map[string]interface{} {
     return map[string]interface{}{
-        "orderId": "ORD-123",
+        "orderId":    "ORD-123",
         "customerId": "CUST-456",
-        "items": []string{"ITEM-1", "ITEM-2"},
-        "total": 300,
+        "items":      []string{"ITEM-1", "ITEM-2"},
+        "total":      300,
     }
 })
 
 // Check inventory
-graph.Node("checkInventory", func(order map[string]interface{}) bool {
-    // Check inventory service
+graph.AddNode("checkInventory", func(order map[string]interface{}) (int, map[string]interface{}) {
     fmt.Println("Checking inventory...")
-    return true // Inventory available
+    return 0, order
+})
+
+// Retry inventory check (loop node)
+graph.AddNode("retryInventory", func(retryCount int, order map[string]interface{}) (int, map[string]interface{}) {
+    fmt.Printf("Retrying inventory check (attempt %d)...\n", retryCount+1)
+    return retryCount + 1, order
+})
+graph.AddLoopEdge("retryInventory", func(retryCount int, order map[string]interface{}) bool {
+    return retryCount < 2
+}, 3)
+
+// Evaluate inventory availability
+graph.AddNode("evaluateInventory", func(retryCount int, order map[string]interface{}) bool {
+    fmt.Println("Inventory available after retries")
+    return true
 })
 
 // Process payment
-graph.Node("processPayment", func(order map[string]interface{}) bool {
-    // Payment service
+graph.AddNode("processPayment", func(available bool) bool {
     fmt.Println("Processing payment...")
-    return true // Payment successful
+    return true
 })
 
-// Update inventory (parallel with payment)
-graph.ParallelNode("updateInventory", func(order map[string]interface{}) bool {
-    // Inventory service
+// Update inventory
+graph.AddNode("updateInventory", func(available bool) bool {
     fmt.Println("Updating inventory...")
     return true
 })
 
 // Ship order
-graph.Node("shipOrder", func(order map[string]interface{}) string {
-    // Shipping service
+graph.AddNode("shipOrder", func(success bool) string {
     fmt.Println("Shipping order...")
     return "SHIP-789"
 })
 
 // Send notification
-graph.EndNode("sendNotification", func(order map[string]interface{}, trackingId string) {
-    // Notification service
-    fmt.Printf("Sending notification for order %s with tracking %s\n", order["orderId"], trackingId)
+graph.AddNode("sendNotification", func(trackingId string) {
+    fmt.Printf("Sending notification with tracking %s\n", trackingId)
 })
 
 // Compensation nodes for failures
-graph.Node("cancelPayment", func(order map[string]interface{}) {
-    fmt.Printf("Cancelling payment for order %s\n", order["orderId"])
+graph.AddNode("cancelPayment", func(success bool) {
+    fmt.Println("Cancelling payment for order")
 })
 
-graph.Node("restoreInventory", func(order map[string]interface{}) {
-    fmt.Printf("Restoring inventory for order %s\n", order["orderId"])
+graph.AddNode("restoreInventory", func(available bool) {
+    fmt.Println("Restoring inventory for order")
 })
 
 // Add edges
 graph.AddEdge("createOrder", "checkInventory")
-graph.AddEdgeWithCondition("checkInventory", "processPayment", func(available bool) bool {
-    return available
+graph.AddEdge("checkInventory", "retryInventory")
+graph.AddEdge("retryInventory", "evaluateInventory")
+graph.AddBranchEdge("evaluateInventory", map[string]any{
+    "processPayment":   func(available bool) bool { return available },
+    "restoreInventory": func(available bool) bool { return !available },
 })
-graph.AddEdgeWithCondition("checkInventory", "restoreInventory", func(available bool) bool {
-    return !available
-})
-graph.AddEdge("checkInventory", "updateInventory")
-graph.AddEdgeWithCondition("processPayment", "shipOrder", func(success bool) bool {
-    return success
-})
-graph.AddEdgeWithCondition("processPayment", "cancelPayment", func(success bool) bool {
-    return !success
+graph.AddEdge("evaluateInventory", "updateInventory")
+graph.AddBranchEdge("processPayment", map[string]any{
+    "shipOrder":     func(success bool) bool { return success },
+    "cancelPayment": func(success bool) bool { return !success },
 })
 graph.AddEdge("shipOrder", "sendNotification")
 
-// Run with parallel execution for independent services
-if err := graph.RunParallel(); err != nil {
+if err := graph.Run(); err != nil {
     fmt.Printf("Order processing failed: %v\n", err)
 }
 ```
 
-### Microservice Orchestration Visualization
+### Order Processing Visualization
 
 ```mermaid
 graph TD
+    retryInventory --> |cond|retryInventory
+    retryInventory --> evaluateInventory
+    evaluateInventory --> |cond|processPayment
+    evaluateInventory --> |cond|restoreInventory
+    evaluateInventory --> updateInventory
     shipOrder --> sendNotification
-    createOrder --> checkInventory
-    checkInventory --> |cond|processPayment
-    checkInventory --> |cond|restoreInventory
-    checkInventory --> updateInventory
+    checkInventory --> retryInventory
     processPayment --> |cond|shipOrder
     processPayment --> |cond|cancelPayment
+    createOrder --> checkInventory
 ```
+
+## Benchmarks
+
+Benchmark results (Apple M1 Pro):
+
+| Benchmark | Iterations | Time (ns/op) | Memory (B/op) | Allocations (allocs/op) |
+|-----------|------------|--------------|---------------|------------------------|
+| BenchmarkC32-8 | 50720 | 23908 | 4789 | 69 |
+| BenchmarkS32-8 | 172738 | 6797 | 3499 | 35 |
+| BenchmarkC6-8 | 157916 | 7419 | 1342 | 22 |
+| BenchmarkC8x8-8 | 12381 | 96892 | 10616 | 189 |
+
+**Benchmark Descriptions:**
+
+- **C32**: 32 concurrent nodes with no dependencies (full parallelism)
+- **S32**: 32 nodes in a sequential chain
+- **C6**: 6 nodes with diamond-shaped dependencies
+- **C8x8**: 8 layers × 8 nodes with full connectivity between layers
 
 ## Examples
 
@@ -728,8 +815,7 @@ The library includes several examples in the `_examples` directory:
 - **Advanced Examples**:
   - [`advanced-chain`](https://github.com/zkep/flow/tree/master/_examples/advanced-chain): Advanced chain with complex parameter passing
   - [`advanced-graph`](https://github.com/zkep/flow/tree/master/_examples/advanced-graph): Advanced graph with multiple node types
-  - [`combined-flow`](https://github.com/zkep/flow/tree/master/_examples/combined-flow): Combining chain and graph workflows
-  - [`advanced-processing`](https://github.com/zkep/flow/tree/master/_examples/advanced-processing): Advanced processing patterns
+
 
 ## Contributing
 

@@ -88,19 +88,32 @@ func example2DataPipeline() {
 		return sum
 	})
 
-	chain.Add("step4", func(sum int, validCount int) float64 {
-		return float64(sum) / float64(validCount)
-	})
+	err := chain.Run()
+	if err != nil {
+		fmt.Printf("   Error: %v\n", err)
+		return
+	}
 
-	newChain := chain.Use("step3", "step2")
-	newChain.Add("combined_step", func(sum int, data []int) float64 {
+	sum, err := chain.Value("step3")
+	if err != nil {
+		fmt.Printf("   Error getting sum: %v\n", err)
+		return
+	}
+	filtered, err := chain.Value("step2")
+	if err != nil {
+		fmt.Printf("   Error getting filtered: %v\n", err)
+		return
+	}
+	fmt.Printf("   Original chain - step3: %v, step2: %v\n", sum, filtered)
+
+	newChain := chain.Use("step2", "step3")
+	newChain.Add("combined_step", func(data []int, sum int) float64 {
 		return float64(sum) / float64(len(data))
 	})
 
-	err := newChain.Run()
+	err = newChain.Run()
 	if err != nil {
-		fmt.Printf("   Notice: new chain cannot run combined step with existing values\n")
-		fmt.Printf("   This is because Use() copies handlers but Run() tries to execute them again\n")
+		fmt.Printf("   Error: %v\n", err)
 	} else {
 		average, err := newChain.Value("combined_step")
 		if err != nil {

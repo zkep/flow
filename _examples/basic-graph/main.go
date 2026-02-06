@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -23,22 +24,22 @@ func example1SimpleFlow() {
 
 	g := flow.NewGraph()
 
-	g.StartNode("start", func() int {
+	g.AddNode("start", func() int {
 		fmt.Println("   Executing start node")
 		return 10
 	})
 
-	g.Node("process1", func(x int) int {
+	g.AddNode("process1", func(x int) int {
 		fmt.Printf("   Executing process1: %d * 2 = %d\n", x, x*2)
 		return x * 2
 	})
 
-	g.Node("process2", func(x int) int {
+	g.AddNode("process2", func(x int) int {
 		fmt.Printf("   Executing process2: %d + 5 = %d\n", x, x+5)
 		return x + 5
 	})
 
-	g.EndNode("end", func(x int) {
+	g.AddNode("end", func(x int) {
 		fmt.Printf("   Executing end node: Final result is %d\n", x)
 	})
 
@@ -46,7 +47,7 @@ func example1SimpleFlow() {
 	g.AddEdge("process1", "process2")
 	g.AddEdge("process2", "end")
 
-	err := g.Run()
+	err := g.Run(context.Background())
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	} else {
@@ -60,12 +61,12 @@ func example2NodeTypes() {
 
 	g := flow.NewGraph()
 
-	g.StartNode("input", func() int {
+	g.AddNode("input", func() int {
 		fmt.Println("   [Start] Node: Input")
 		return 42
 	})
 
-	g.Node("branch", func(x int) int {
+	g.AddNode("branch", func(x int) int {
 		fmt.Printf("   [Branch] Node: Check if %d > 40\n", x)
 		if x > 40 {
 			return 1
@@ -73,22 +74,22 @@ func example2NodeTypes() {
 		return 0
 	})
 
-	g.Node("processA", func(x int) int {
+	g.AddNode("processA", func(x int) int {
 		fmt.Printf("   [Parallel] Node A: %d * 2\n", x)
 		return x * 2
 	})
 
-	g.Node("processB", func(x int) int {
+	g.AddNode("processB", func(x int) int {
 		fmt.Printf("   [Parallel] Node B: %d + 10\n", x)
 		return x + 10
 	})
 
-	g.Node("loop", func(x int) int {
+	g.AddNode("loop", func(x int) int {
 		fmt.Printf("   [Loop] Node: Loop %d times\n", x)
 		return x - 1
 	})
 
-	g.EndNode("output", func(result int) {
+	g.AddNode("output", func(result int) {
 		fmt.Printf("   [End] Node: Result = %d\n", result)
 	})
 
@@ -99,7 +100,7 @@ func example2NodeTypes() {
 	g.AddEdge("processB", "loop")
 	g.AddEdge("loop", "output")
 
-	err := g.Run()
+	err := g.Run(context.Background())
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	}
@@ -111,23 +112,23 @@ func example4GraphVisualization() {
 
 	g := flow.NewGraph()
 
-	g.StartNode("read", func() string {
+	g.AddNode("read", func() string {
 		return "data"
 	})
 
-	g.Node("validate", func(data string) bool {
+	g.AddNode("validate", func(data string) bool {
 		return len(data) > 0
 	})
 
-	g.Node("transform", func(data string) string {
+	g.AddNode("transform", func(data string) string {
 		return data + "_processed"
 	})
 
-	g.Node("analyze", func(data string) float64 {
+	g.AddNode("analyze", func(data string) float64 {
 		return float64(len(data))
 	})
 
-	g.EndNode("store", func(result float64) {
+	g.AddNode("store", func(result float64) {
 	})
 
 	g.AddEdge("read", "validate")

@@ -226,25 +226,33 @@ func TestChainStepNotFound(t *testing.T) {
 	}
 }
 
-func TestChainFunctionPanic(t *testing.T) {
-	chain := NewChain()
+func TestChainPanic(t *testing.T) {
+	t.Run("panic in second step", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { return 10 })
+		chain.Add("step2", func(x int) int { panic("test panic") })
 
-	chain.Add("step1", func() int {
-		return 10
+		err := chain.Run()
+		if err == nil {
+			t.Fatalf("Expected error for panic")
+		}
+		if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
+			t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
+		}
 	})
 
-	chain.Add("step2", func(x int) int {
-		panic("test panic")
+	t.Run("panic in first step", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { panic("test panic") })
+
+		err := chain.Run()
+		if err == nil {
+			t.Fatalf("Expected error for panic")
+		}
+		if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
+			t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
+		}
 	})
-
-	err := chain.Run()
-	if err == nil {
-		t.Fatalf("Expected error for panic")
-	}
-
-	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
-		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
-	}
 }
 
 func TestChainArgCountMismatch(t *testing.T) {
@@ -476,23 +484,6 @@ func TestChainUseWithEdgeCases(t *testing.T) {
 	}
 }
 
-func TestChainWithPanicRecovery(t *testing.T) {
-	chain := NewChain()
-
-	chain.Add("step1", func() int {
-		panic("test panic")
-	})
-
-	err := chain.Run()
-	if err == nil {
-		t.Fatalf("Expected error for panic")
-	}
-
-	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
-		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
-	}
-}
-
 func TestChainErrorMethod(t *testing.T) {
 	chain := NewChain()
 
@@ -530,98 +521,213 @@ type TestStruct struct{}
 func (t TestStruct) Test() {}
 
 func TestCanConvert(t *testing.T) {
-	// Test case 1: Same type
-	if !canConvert(reflect.TypeOf(10), reflect.TypeOf(20)) {
-		t.Error("Expected same types to be convertible")
-	}
+	t.Run("same types", func(t *testing.T) {
+		if !canConvert(reflect.TypeOf(10), reflect.TypeOf(20)) {
+			t.Error("Expected same types to be convertible")
+		}
+	})
 
-	// Test case 2: Assignable types (interface implementation)
-	if !canConvert(reflect.TypeOf(TestStruct{}), reflect.TypeOf((*TestInterface)(nil)).Elem()) {
-		t.Error("Expected struct implementing interface to be convertible")
-	}
+	t.Run("interface implementation", func(t *testing.T) {
+		if !canConvert(reflect.TypeOf(TestStruct{}), reflect.TypeOf((*TestInterface)(nil)).Elem()) {
+			t.Error("Expected struct implementing interface to be convertible")
+		}
+	})
 
-	// Test case 3: Non-convertible types (struct and int are not convertible)
-	type NonConvertibleStruct struct{ Field int }
-	if canConvert(reflect.TypeOf(10), reflect.TypeOf(NonConvertibleStruct{})) {
-		t.Error("Expected different types to not be convertible")
-	}
+	t.Run("non-convertible types", func(t *testing.T) {
+		type NonConvertibleStruct struct{ Field int }
+		if canConvert(reflect.TypeOf(10), reflect.TypeOf(NonConvertibleStruct{})) {
+			t.Error("Expected different types to not be convertible")
+		}
+	})
+
+	t.Run("numeric type conversion", func(t *testing.T) {
+		if !canConvert(reflect.TypeOf(int(10)), reflect.TypeOf(float64(0))) {
+			t.Error("Expected int to float64 to be convertible")
+		}
+		if !canConvert(reflect.TypeOf(int32(10)), reflect.TypeOf(int64(0))) {
+			t.Error("Expected int32 to int64 to be convertible")
+		}
+	})
 }
 
 func TestPrepareArgs(t *testing.T) {
-	// Test case 1: Exact argument count match
-	fn := func(a, b int) int {
-		return a + b
-	}
-	fnType := reflect.TypeOf(fn)
-	args, err := prepareArgs([]any{10, 20}, fnType)
-	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
-	}
-	if len(args) != 2 {
-		t.Errorf("Expected 2 arguments, got: %d", len(args))
-	}
-
-	// Test case 2: Single argument with slice parameter
-	sliceFn := func(nums []int) int {
-		sum := 0
-		for _, num := range nums {
-			sum += num
+	t.Run("exact argument count match", func(t *testing.T) {
+		fn := func(a, b int) int { return a + b }
+		fnType := reflect.TypeOf(fn)
+		argTypes := []reflect.Type{fnType.In(0), fnType.In(1)}
+		values := []reflect.Value{reflect.ValueOf(10), reflect.ValueOf(20)}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
 		}
-		return sum
-	}
-	sliceFnType := reflect.TypeOf(sliceFn)
-	sliceArgs, err := prepareArgs([]any{10, 20, 30}, sliceFnType)
-	if err != nil {
-		t.Fatalf("Expected no error for slice parameter, got: %v", err)
-	}
-	if len(sliceArgs) != 1 {
-		t.Errorf("Expected 1 argument for slice parameter, got: %d", len(sliceArgs))
-	}
+		if len(args) != 2 {
+			t.Errorf("Expected 2 arguments, got: %d", len(args))
+		}
+	})
 
-	// Test case 3: Argument count mismatch
-	_, err = prepareArgs([]any{10}, fnType)
-	if err == nil {
-		t.Fatal("Expected error for argument count mismatch, got nil")
-	}
+	t.Run("single argument with slice parameter", func(t *testing.T) {
+		sliceFn := func(nums []int) int {
+			sum := 0
+			for _, num := range nums {
+				sum += num
+			}
+			return sum
+		}
+		sliceFnType := reflect.TypeOf(sliceFn)
+		sliceArgTypes := []reflect.Type{sliceFnType.In(0)}
+		sliceValues := []reflect.Value{reflect.ValueOf(10), reflect.ValueOf(20), reflect.ValueOf(30)}
+		sliceArgs, err := prepareArgsWithType(sliceValues, sliceArgTypes)
+		if err != nil {
+			t.Fatalf("Expected no error for slice parameter, got: %v", err)
+		}
+		if len(sliceArgs) != 1 {
+			t.Errorf("Expected 1 argument for slice parameter, got: %d", len(sliceArgs))
+		}
+	})
 
-	// Test case 4: Single value argument
-	singleArgFn := func(x int) int {
-		return x * 2
-	}
-	singleArgFnType := reflect.TypeOf(singleArgFn)
-	singleArgs, err := prepareArgs([]any{10}, singleArgFnType)
-	if err != nil {
-		t.Fatalf("Expected no error for single argument, got: %v", err)
-	}
-	if len(singleArgs) != 1 {
-		t.Errorf("Expected 1 argument, got: %d", len(singleArgs))
-	}
+	t.Run("argument count mismatch", func(t *testing.T) {
+		fn := func(a, b int) int { return a + b }
+		fnType := reflect.TypeOf(fn)
+		argTypes := []reflect.Type{fnType.In(0), fnType.In(1)}
+		_, err := prepareArgsWithType([]reflect.Value{reflect.ValueOf(10)}, argTypes)
+		if err == nil {
+			t.Fatal("Expected error for argument count mismatch, got nil")
+		}
+	})
 
-	// Test case 5: Empty values with no arguments
-	noArgFn := func() int {
-		return 10
-	}
-	noArgFnType := reflect.TypeOf(noArgFn)
-	noArgs, err := prepareArgs([]any{}, noArgFnType)
-	if err != nil {
-		t.Fatalf("Expected no error for no arguments, got: %v", err)
-	}
-	if len(noArgs) != 0 {
-		t.Errorf("Expected 0 arguments, got: %d", len(noArgs))
-	}
+	t.Run("single value argument", func(t *testing.T) {
+		singleArgFn := func(x int) int { return x * 2 }
+		singleArgFnType := reflect.TypeOf(singleArgFn)
+		singleArgTypes := []reflect.Type{singleArgFnType.In(0)}
+		singleArgs, err := prepareArgsWithType([]reflect.Value{reflect.ValueOf(10)}, singleArgTypes)
+		if err != nil {
+			t.Fatalf("Expected no error for single argument, got: %v", err)
+		}
+		if len(singleArgs) != 1 {
+			t.Errorf("Expected 1 argument, got: %d", len(singleArgs))
+		}
+	})
 
-	// Test case 6: Type conversion
-	convertFn := func(x float64) float64 {
-		return x * 2
-	}
-	convertFnType := reflect.TypeOf(convertFn)
-	convertArgs, err := prepareArgs([]any{10}, convertFnType)
-	if err != nil {
-		t.Fatalf("Expected no error for type conversion, got: %v", err)
-	}
-	if len(convertArgs) != 1 {
-		t.Errorf("Expected 1 argument, got: %d", len(convertArgs))
-	}
+	t.Run("no arguments", func(t *testing.T) {
+		noArgs, err := prepareArgsWithType([]reflect.Value{}, []reflect.Type{})
+		if err != nil {
+			t.Fatalf("Expected no error for no arguments, got: %v", err)
+		}
+		if len(noArgs) != 0 {
+			t.Errorf("Expected 0 arguments, got: %d", len(noArgs))
+		}
+	})
+
+	t.Run("no arguments but with values", func(t *testing.T) {
+		argTypes := []reflect.Type{}
+		values := []reflect.Value{reflect.ValueOf(10)}
+		_, err := prepareArgsWithType(values, argTypes)
+		if err == nil {
+			t.Fatal("Expected error for argument count mismatch")
+		}
+	})
+
+	t.Run("type conversion", func(t *testing.T) {
+		argTypes := []reflect.Type{reflect.TypeOf(float64(0))}
+		values := []reflect.Value{reflect.ValueOf(10)}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error for type conversion, got: %v", err)
+		}
+		if len(args) != 1 {
+			t.Errorf("Expected 1 argument, got: %d", len(args))
+		}
+	})
+
+	t.Run("nil value", func(t *testing.T) {
+		argTypes := []reflect.Type{reflect.TypeOf("")}
+		values := []reflect.Value{reflect.ValueOf(nil)}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+		if len(args) != 1 {
+			t.Errorf("Expected 1 argument, got: %d", len(args))
+		}
+	})
+
+	t.Run("slice from array", func(t *testing.T) {
+		argTypes := []reflect.Type{reflect.TypeOf(0), reflect.TypeOf(0), reflect.TypeOf(0)}
+		values := []reflect.Value{reflect.ValueOf([3]int{1, 2, 3})}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+		if len(args) != 3 {
+			t.Errorf("Expected 3 arguments, got: %d", len(args))
+		}
+	})
+
+	t.Run("slice arg count mismatch", func(t *testing.T) {
+		argTypes := []reflect.Type{reflect.TypeOf(0), reflect.TypeOf(0)}
+		values := []reflect.Value{reflect.ValueOf([]int{1, 2, 3})}
+		_, err := prepareArgsWithType(values, argTypes)
+		if err == nil {
+			t.Fatal("Expected error for argument count mismatch")
+		}
+	})
+
+	t.Run("pool capacity", func(t *testing.T) {
+		argTypes := []reflect.Type{
+			reflect.TypeOf(0), reflect.TypeOf(0), reflect.TypeOf(0), reflect.TypeOf(0),
+			reflect.TypeOf(0), reflect.TypeOf(0), reflect.TypeOf(0), reflect.TypeOf(0),
+			reflect.TypeOf(0), reflect.TypeOf(0),
+		}
+		values := []reflect.Value{
+			reflect.ValueOf(1), reflect.ValueOf(2), reflect.ValueOf(3), reflect.ValueOf(4),
+			reflect.ValueOf(5), reflect.ValueOf(6), reflect.ValueOf(7), reflect.ValueOf(8),
+			reflect.ValueOf(9), reflect.ValueOf(10),
+		}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error, got: %v", err)
+		}
+		if len(args) != 10 {
+			t.Errorf("Expected 10 arguments, got: %d", len(args))
+		}
+	})
+
+	t.Run("slice conversion", func(t *testing.T) {
+		sliceFn := func(nums []float64) float64 {
+			sum := 0.0
+			for _, num := range nums {
+				sum += num
+			}
+			return sum
+		}
+		sliceFnType := reflect.TypeOf(sliceFn)
+		argTypes := []reflect.Type{sliceFnType.In(0)}
+		values := []reflect.Value{reflect.ValueOf(1), reflect.ValueOf(2), reflect.ValueOf(3)}
+		args, err := prepareArgsWithType(values, argTypes)
+		if err != nil {
+			t.Fatalf("Expected no error for slice conversion, got: %v", err)
+		}
+		if len(args) != 1 {
+			t.Errorf("Expected 1 argument, got: %d", len(args))
+		}
+	})
+
+	t.Run("slice conversion error", func(t *testing.T) {
+		sliceFn := func(nums []int) int {
+			sum := 0
+			for _, num := range nums {
+				sum += num
+			}
+			return sum
+		}
+		sliceFnType := reflect.TypeOf(sliceFn)
+		argTypes := []reflect.Type{sliceFnType.In(0)}
+		values := []reflect.Value{reflect.ValueOf("not"), reflect.ValueOf("convertible")}
+		_, err := prepareArgsWithType(values, argTypes)
+		if err == nil {
+			t.Fatalf("Expected error for slice conversion failure")
+		}
+	})
 }
 
 func TestChainAddWithExistingError(t *testing.T) {
@@ -662,40 +768,38 @@ func TestChainUseWithExistingError(t *testing.T) {
 	}
 }
 
-func TestChainValuesIndexOutOfBounds(t *testing.T) {
-	chain := NewChain()
-	chain.Add("step1", func() int {
-		return 10
+func TestChainIndexOutOfBounds(t *testing.T) {
+	t.Run("Values method", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { return 10 })
+		chain.stepNames["step2"] = 100
+
+		err := chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		_, err = chain.Values("step2")
+		if err == nil {
+			t.Errorf("Expected error for out of bounds index")
+		}
 	})
-	chain.stepNames["step2"] = 100
 
-	err := chain.Run()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	t.Run("Value method", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { return 10 })
+		chain.stepNames["step2"] = 100
 
-	_, err = chain.Values("step2")
-	if err == nil {
-		t.Errorf("Expected error for out of bounds index")
-	}
-}
+		err := chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
 
-func TestChainValueIndexOutOfBounds(t *testing.T) {
-	chain := NewChain()
-	chain.Add("step1", func() int {
-		return 10
+		_, err = chain.Value("step2")
+		if err == nil {
+			t.Errorf("Expected error for out of bounds index")
+		}
 	})
-	chain.stepNames["step2"] = 100
-
-	err := chain.Run()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-
-	_, err = chain.Value("step2")
-	if err == nil {
-		t.Errorf("Expected error for out of bounds index")
-	}
 }
 
 func TestChainValueEmptyValues(t *testing.T) {
@@ -737,7 +841,8 @@ func TestChainCallWithExistingError(t *testing.T) {
 	chain := NewChain()
 	chain.err = &ChainError{Message: "existing error"}
 
-	values := chain.call(func() int { return 10 }, []any{})
+	fn := func() int { return 10 }
+	values := chain.call(reflect.ValueOf(fn), []reflect.Type{}, []reflect.Value{})
 
 	if len(values) != 0 {
 		t.Errorf("Expected empty values when error exists")
@@ -747,7 +852,7 @@ func TestChainCallWithExistingError(t *testing.T) {
 func TestAddArg(t *testing.T) {
 	var args []reflect.Value
 
-	err := addArg(&args, 10, reflect.TypeOf(0))
+	err := addArg(&args, reflect.ValueOf(10), reflect.TypeOf(0))
 	if err != nil {
 		t.Errorf("Expected no error, got: %v", err)
 	}
@@ -777,85 +882,73 @@ func TestChainWithInterfaceSlice(t *testing.T) {
 	}
 }
 
-func TestChainRunTwice(t *testing.T) {
-	chain := NewChain()
+func TestChainMultipleRuns(t *testing.T) {
+	t.Run("run twice same result", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { return 10 })
 
-	chain.Add("step1", func() int {
-		return 10
-	})
-
-	err := chain.Run()
-	if err != nil {
-		t.Fatalf("Unexpected error on first run: %v", err)
-	}
-
-	err = chain.Run()
-	if err != nil {
-		t.Fatalf("Unexpected error on second run: %v", err)
-	}
-
-	value, err := chain.Value("step1")
-	if err != nil {
-		t.Fatalf("Unexpected error getting value: %v", err)
-	}
-
-	if value.(int) != 10 {
-		t.Errorf("Expected 10, got %v", value)
-	}
-}
-
-func TestChainCallWithPanic(t *testing.T) {
-	chain := NewChain()
-
-	chain.Add("step1", func() int {
-		return 10
-	})
-
-	chain.Add("step2", func(x int) int {
-		panic("unexpected panic")
-	})
-
-	err := chain.Run()
-	if err == nil {
-		t.Fatalf("Expected error for panic")
-	}
-
-	if !strings.HasPrefix(err.Error(), ErrFunctionPanicked) {
-		t.Errorf("Expected error to start with '%s', got '%v'", ErrFunctionPanicked, err.Error())
-	}
-}
-
-func TestPrepareArgsWithSliceConversion(t *testing.T) {
-	sliceFn := func(nums []float64) float64 {
-		sum := 0.0
-		for _, num := range nums {
-			sum += num
+		err := chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error on first run: %v", err)
 		}
-		return sum
-	}
-	sliceFnType := reflect.TypeOf(sliceFn)
-	args, err := prepareArgs([]any{1, 2, 3}, sliceFnType)
-	if err != nil {
-		t.Fatalf("Expected no error for slice conversion, got: %v", err)
-	}
-	if len(args) != 1 {
-		t.Errorf("Expected 1 argument, got: %d", len(args))
-	}
-}
 
-func TestPrepareArgsWithSliceConversionError(t *testing.T) {
-	sliceFn := func(nums []int) int {
-		sum := 0
-		for _, num := range nums {
-			sum += num
+		err = chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error on second run: %v", err)
 		}
-		return sum
-	}
-	sliceFnType := reflect.TypeOf(sliceFn)
-	_, err := prepareArgs([]any{"not", "convertible"}, sliceFnType)
-	if err == nil {
-		t.Fatalf("Expected error for slice conversion failure")
-	}
+
+		value, err := chain.Value("step1")
+		if err != nil {
+			t.Fatalf("Unexpected error getting value: %v", err)
+		}
+
+		if value.(int) != 10 {
+			t.Errorf("Expected 10, got %v", value)
+		}
+	})
+
+	t.Run("idempotent - function called once", func(t *testing.T) {
+		chain := NewChain()
+		callCount := 0
+		chain.Add("step1", func() int {
+			callCount++
+			return 10
+		})
+
+		err := chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error on first run: %v", err)
+		}
+
+		err = chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error on second run: %v", err)
+		}
+
+		if callCount != 1 {
+			t.Errorf("Expected function to be called once, got %d calls", callCount)
+		}
+	})
+
+	t.Run("multiple steps", func(t *testing.T) {
+		chain := NewChain()
+		chain.Add("step1", func() int { return 10 })
+		chain.Add("step2", func(x int) int { return x * 2 })
+
+		err := chain.Run()
+		if err != nil {
+			t.Fatalf("Unexpected error on first run: %v", err)
+		}
+
+		value1, err := chain.Value("step2")
+		if err != nil {
+			t.Fatalf("Unexpected error getting value: %v", err)
+		}
+
+		if value1.(int) != 20 {
+			t.Errorf("Expected 20, got %v", value1)
+		}
+	})
 }
 
 func TestChainHandleNonFunctionArray(t *testing.T) {
@@ -945,16 +1038,6 @@ func TestChainErrorReturnWithMultipleValues(t *testing.T) {
 	}
 }
 
-func TestCanConvertWithConvertibleTypes(t *testing.T) {
-	if !canConvert(reflect.TypeOf(int(10)), reflect.TypeOf(float64(0))) {
-		t.Error("Expected int to float64 to be convertible")
-	}
-
-	if !canConvert(reflect.TypeOf(int32(10)), reflect.TypeOf(int64(0))) {
-		t.Error("Expected int32 to int64 to be convertible")
-	}
-}
-
 func TestChainStruct(t *testing.T) {
 	chain := NewChain()
 	type Result1 struct {
@@ -1000,7 +1083,7 @@ func TestChainStruct(t *testing.T) {
 
 func TestAddArgWithInvalidValue(t *testing.T) {
 	var args []reflect.Value
-	err := addArg(&args, nil, reflect.TypeOf(0))
+	err := addArg(&args, reflect.Value{}, reflect.TypeOf(0))
 	if err != nil {
 		t.Errorf("Expected no error for nil value, got: %v", err)
 	}
@@ -1011,23 +1094,12 @@ func TestAddArgWithInvalidValue(t *testing.T) {
 
 func TestAddArgWithTypeConversion(t *testing.T) {
 	var args []reflect.Value
-	err := addArg(&args, int32(10), reflect.TypeOf(int64(0)))
+	err := addArg(&args, reflect.ValueOf(int32(10)), reflect.TypeOf(int64(0)))
 	if err != nil {
 		t.Errorf("Expected no error for type conversion, got: %v", err)
 	}
 	if len(args) != 1 {
 		t.Errorf("Expected 1 argument, got: %d", len(args))
-	}
-}
-
-func TestPrepareArgsWithNilValue(t *testing.T) {
-	fn := func(s string) string {
-		return s
-	}
-	fnType := reflect.TypeOf(fn)
-	_, err := prepareArgs([]any{nil}, fnType)
-	if err != nil {
-		t.Errorf("Expected no error for nil value, got: %v", err)
 	}
 }
 
@@ -1129,5 +1201,467 @@ func TestChainUseWithEmptyNames(t *testing.T) {
 
 	if len(newChain.values) != 0 {
 		t.Errorf("Expected no values in new chain")
+	}
+}
+
+func TestChainNoArgFunction(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(int) != 10 {
+		t.Errorf("Expected 10, got %v", value)
+	}
+}
+
+func TestChainNoArgFunctionWithValues(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	values, err := chain.Values("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting values: %v", err)
+	}
+
+	if len(values) != 1 || values[0].(int) != 10 {
+		t.Errorf("Expected [10], got %v", values)
+	}
+}
+
+func TestChainFunctionReturningErrorOnly(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() error {
+		return nil
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestChainFunctionReturningErrorOnlyWithError(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() error {
+		return &ChainError{Message: "test error"}
+	})
+
+	err := chain.Run()
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+
+	if err.Error() != "test error" {
+		t.Errorf("Expected 'test error', got '%v'", err.Error())
+	}
+}
+
+func TestChainEmptyChain(t *testing.T) {
+	chain := NewChain()
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestChainUseWithMultipleSteps(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	chain.Add("step2", func(x int) int {
+		return x * 2
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	newChain := chain.Use("step1")
+
+	err = newChain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := newChain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(int) != 10 {
+		t.Errorf("Expected 10, got %v", value)
+	}
+}
+
+func TestChainAddAfterError(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	chain.Add("step2", func(x int) (int, error) {
+		return 0, &ChainError{Message: "test error"}
+	})
+
+	err := chain.Run()
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+
+	chain.Add("step3", func(x int) int {
+		return x * 2
+	})
+
+	if chain.err == nil {
+		t.Error("Expected error to be preserved")
+	}
+}
+
+func TestChainUseAfterError(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	chain.Add("step2", func(x int) (int, error) {
+		return 0, &ChainError{Message: "test error"}
+	})
+
+	err := chain.Run()
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+
+	newChain := chain.Use("step1")
+
+	if newChain.err == nil {
+		t.Error("Expected error to be propagated to new chain")
+	}
+}
+
+func TestChainWithMultipleErrors(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	chain.Add("step2", func(x int) (int, error) {
+		return 0, &ChainError{Message: "first error"}
+	})
+
+	chain.Add("step3", func(x int) (int, error) {
+		return 0, &ChainError{Message: "second error"}
+	})
+
+	err := chain.Run()
+	if err == nil {
+		t.Fatal("Expected error")
+	}
+
+	if err.Error() != "first error" {
+		t.Errorf("Expected 'first error', got '%v'", err.Error())
+	}
+}
+
+func TestChainStructWithMultipleFields(t *testing.T) {
+	type Data struct {
+		A int
+		B string
+		C bool
+	}
+
+	chain := NewChain()
+
+	chain.Add("step1", func() Data {
+		return Data{A: 10, B: "hello", C: true}
+	})
+
+	chain.Add("step2", func(d Data) Data {
+		d.A *= 2
+		return d
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step2")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	d := value.(Data)
+	if d.A != 20 || d.B != "hello" || d.C != true {
+		t.Errorf("Expected {20, hello, true}, got %+v", d)
+	}
+}
+
+func TestChainCallResultCountMismatch(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	chain.Add("step2", func(x int) int {
+		return x * 2
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestChainWithInterfaceValue(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() any {
+		return "hello"
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(string) != "hello" {
+		t.Errorf("Expected 'hello', got %v", value)
+	}
+}
+
+func TestChainWithFuncValue(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() func() int {
+		return func() int { return 42 }
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	fn := value.(func() int)
+	if fn() != 42 {
+		t.Errorf("Expected 42, got %v", fn())
+	}
+}
+
+func TestChainAddArgWithNilValue(t *testing.T) {
+	var args []reflect.Value
+
+	err := addArg(&args, reflect.Value{}, reflect.TypeOf(""))
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	if len(args) != 1 {
+		t.Errorf("Expected 1 argument, got: %d", len(args))
+	}
+}
+
+func TestChainAddArgWithConversion(t *testing.T) {
+	var args []reflect.Value
+
+	err := addArg(&args, reflect.ValueOf(10), reflect.TypeOf(float64(0)))
+	if err != nil {
+		t.Errorf("Expected no error, got: %v", err)
+	}
+
+	if len(args) != 1 {
+		t.Errorf("Expected 1 argument, got: %d", len(args))
+	}
+
+	if args[0].Float() != 10.0 {
+		t.Errorf("Expected 10.0, got: %v", args[0].Float())
+	}
+}
+
+func TestChainHandleNonFunctionType(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", 42)
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value != 42 {
+		t.Errorf("Expected 42, got %v", value)
+	}
+}
+
+func TestChainHandleNonFunctionTypeWithInterface(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", []any{1, "hello", true})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	values, err := chain.Values("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting values: %v", err)
+	}
+
+	if len(values) != 3 {
+		t.Errorf("Expected 3 values, got %d", len(values))
+	}
+}
+
+func TestChainErrorType(t *testing.T) {
+	err := &ChainError{Message: "test error"}
+	if err.Error() != "test error" {
+		t.Errorf("Expected 'test error', got '%v'", err.Error())
+	}
+}
+
+func TestChainRunWithDoFlag(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() int {
+		return 10
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if !chain.handlers[0].do {
+		t.Error("Expected do flag to be set")
+	}
+}
+
+func TestChainWithSliceOfStructs(t *testing.T) {
+	type Item struct {
+		Name  string
+		Value int
+	}
+
+	chain := NewChain()
+
+	chain.Add("step1", func() []Item {
+		return []Item{
+			{Name: "a", Value: 1},
+			{Name: "b", Value: 2},
+		}
+	})
+
+	chain.Add("step2", func(items []Item) int {
+		sum := 0
+		for _, item := range items {
+			sum += item.Value
+		}
+		return sum
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step2")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(int) != 3 {
+		t.Errorf("Expected 3, got %v", value)
+	}
+}
+
+func TestChainWithMapReturn(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() map[string]int {
+		return map[string]int{"a": 1, "b": 2}
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	m := value.(map[string]int)
+	if m["a"] != 1 || m["b"] != 2 {
+		t.Errorf("Expected map[a:1 b:2], got %v", m)
+	}
+}
+
+func TestChainWithBoolReturn(t *testing.T) {
+	chain := NewChain()
+
+	chain.Add("step1", func() bool {
+		return true
+	})
+
+	err := chain.Run()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	value, err := chain.Value("step1")
+	if err != nil {
+		t.Fatalf("Unexpected error getting value: %v", err)
+	}
+
+	if value.(bool) != true {
+		t.Errorf("Expected true, got %v", value)
 	}
 }
