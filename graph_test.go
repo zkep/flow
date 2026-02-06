@@ -152,7 +152,7 @@ func TestGraphWithMultiReturn(t *testing.T) {
 		}
 		return "invalid"
 	})
-	graph.AddNode("end", func(s string) { fmt.Println("Final:", s) })
+	graph.AddNode("end", func(s string) {})
 
 	graph.AddEdge("start", "process")
 	graph.AddEdge("process", "verify")

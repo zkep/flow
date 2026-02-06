@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/zkep/flow"
 )
 
 func BenchmarkC32(b *testing.B) {
-	graph := NewGraph()
+	graph := flow.NewGraph()
 	graph.AddNode("N0", func() {})
 	for j := 1; j < 32; j++ {
 		graph.AddNode(fmt.Sprintf("N%d", j), func() {})
@@ -20,7 +22,7 @@ func BenchmarkC32(b *testing.B) {
 }
 
 func BenchmarkS32(b *testing.B) {
-	graph := NewGraph()
+	graph := flow.NewGraph()
 	graph.AddNode("N0", func() {})
 	prev := "N0"
 	for i := 1; i < 32; i++ {
@@ -37,7 +39,7 @@ func BenchmarkS32(b *testing.B) {
 }
 
 func BenchmarkC6(b *testing.B) {
-	graph := NewGraph()
+	graph := flow.NewGraph()
 	graph.AddNode("N0", func() {})
 	graph.AddNode("N1", func() {})
 	graph.AddNode("N2", func() {})
@@ -59,7 +61,7 @@ func BenchmarkC6(b *testing.B) {
 }
 
 func BenchmarkC8x8(b *testing.B) {
-	graph := NewGraph()
+	graph := flow.NewGraph()
 	layersCount := 8
 	layerNodesCount := 8
 
