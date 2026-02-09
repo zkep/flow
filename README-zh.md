@@ -188,7 +188,7 @@ func main() {
 
 ## 文档
 
-完整文档请查看 [docs/doc-zh.md](docs/doc-zh.md)。
+完整文档请查看 [docs/zh-CN/doc.md](docs/zh-CN/doc.md)。
 
 ## 示例
 

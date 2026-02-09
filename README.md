@@ -188,7 +188,7 @@ func main() {
 
 ## Documentation
 
-For full documentation, see [docs/doc.md](docs/doc.md).
+For full documentation, see [docs/en-US/doc.md](docs/en-US/doc.md).
 
 ## Examples
 

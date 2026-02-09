@@ -34,7 +34,7 @@ func BenchmarkS32(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		_ = graph.RunSequentialWithContext(context.Background())
+		_ = graph.RunWithContext(context.Background())
 	}
 }
 
