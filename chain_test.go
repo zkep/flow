@@ -1,9 +1,16 @@
 package flow
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+)
+
+const (
+	testString   = "test"
+	testErrorMsg = "test error"
+	testHelloMsg = "hello"
 )
 
 func TestChainAddAndRun(t *testing.T) {
@@ -161,7 +168,7 @@ func TestChainValues(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() (int, string, bool) {
-		return 10, "test", true
+		return 10, testString, true
 	})
 
 	err := chain.Run()
@@ -178,12 +185,12 @@ func TestChainValues(t *testing.T) {
 		t.Errorf("Expected 3 values, got %d", len(values))
 	}
 
-	if values[0] != 10 || values[1] != "test" || values[2] != true {
+	if values[0] != 10 || values[1] != testString || values[2] != true {
 		t.Errorf("Expected [10, 'test', true], got %v", values)
 	}
 }
 
-func TestChainError(t *testing.T) {
+func TestFlowError(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() int {
@@ -191,7 +198,7 @@ func TestChainError(t *testing.T) {
 	})
 
 	chain.Add("step2", func(x int) (int, error) {
-		return 0, &ChainError{Message: "test error"}
+		return 0, &FlowError{Message: testErrorMsg}
 	})
 
 	err := chain.Run()
@@ -199,7 +206,7 @@ func TestChainError(t *testing.T) {
 		t.Fatalf("Expected error, got nil")
 	}
 
-	if err.Error() != "test error" {
+	if err.Error() != testErrorMsg {
 		t.Errorf("Expected 'test error', got %v", err.Error())
 	}
 }
@@ -374,7 +381,7 @@ func TestChainWithSliceParameter(t *testing.T) {
 	}
 }
 
-func TestChainErrorPropagation(t *testing.T) {
+func TestFlowErrorPropagation(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() int {
@@ -382,7 +389,7 @@ func TestChainErrorPropagation(t *testing.T) {
 	})
 
 	chain.Add("step2", func(x int) (int, error) {
-		return 0, &ChainError{Message: "first error"}
+		return 0, &FlowError{Message: "first error"}
 	})
 
 	chain.Add("step3", func(y int) int {
@@ -484,7 +491,7 @@ func TestChainUseWithEdgeCases(t *testing.T) {
 	}
 }
 
-func TestChainErrorMethod(t *testing.T) {
+func TestFlowErrorMethod(t *testing.T) {
 	chain := NewChain()
 
 	// Test Error() method on chain with no error
@@ -502,7 +509,7 @@ func TestChainErrorMethod(t *testing.T) {
 	chain2.Add("step2", func(a, b int) int {
 		return a + b
 	})
-	chain2.Run() // Run to trigger error
+	_ = chain2.Run() // Run to trigger error
 	err = chain2.Error()
 	if err == nil {
 		t.Fatal("Expected error, got nil")
@@ -520,34 +527,64 @@ type TestStruct struct{}
 // Test implements TestInterface for TestStruct
 func (t TestStruct) Test() {}
 
+type CanConvertTestCase struct {
+	Name     string
+	From     reflect.Type
+	To       reflect.Type
+	Expected bool
+}
+
+func (tc CanConvertTestCase) Run() error {
+	result := canConvert(tc.From, tc.To)
+	if result != tc.Expected {
+		return fmt.Errorf("expected %v, got %v", tc.Expected, result)
+	}
+	return nil
+}
+
 func TestCanConvert(t *testing.T) {
-	t.Run("same types", func(t *testing.T) {
-		if !canConvert(reflect.TypeOf(10), reflect.TypeOf(20)) {
-			t.Error("Expected same types to be convertible")
-		}
-	})
+	type NonConvertibleStruct struct{ Field int }
 
-	t.Run("interface implementation", func(t *testing.T) {
-		if !canConvert(reflect.TypeOf(TestStruct{}), reflect.TypeOf((*TestInterface)(nil)).Elem()) {
-			t.Error("Expected struct implementing interface to be convertible")
-		}
-	})
+	testCases := []CanConvertTestCase{
+		{
+			Name:     "same types",
+			From:     reflect.TypeOf(10),
+			To:       reflect.TypeOf(20),
+			Expected: true,
+		},
+		{
+			Name:     "interface implementation",
+			From:     reflect.TypeOf(TestStruct{}),
+			To:       reflect.TypeOf((*TestInterface)(nil)).Elem(),
+			Expected: true,
+		},
+		{
+			Name:     "non-convertible types",
+			From:     reflect.TypeOf(10),
+			To:       reflect.TypeOf(NonConvertibleStruct{}),
+			Expected: false,
+		},
+		{
+			Name:     "int to float64",
+			From:     reflect.TypeOf(int(10)),
+			To:       reflect.TypeOf(float64(0)),
+			Expected: true,
+		},
+		{
+			Name:     "int32 to int64",
+			From:     reflect.TypeOf(int32(10)),
+			To:       reflect.TypeOf(int64(0)),
+			Expected: true,
+		},
+	}
 
-	t.Run("non-convertible types", func(t *testing.T) {
-		type NonConvertibleStruct struct{ Field int }
-		if canConvert(reflect.TypeOf(10), reflect.TypeOf(NonConvertibleStruct{})) {
-			t.Error("Expected different types to not be convertible")
-		}
-	})
-
-	t.Run("numeric type conversion", func(t *testing.T) {
-		if !canConvert(reflect.TypeOf(int(10)), reflect.TypeOf(float64(0))) {
-			t.Error("Expected int to float64 to be convertible")
-		}
-		if !canConvert(reflect.TypeOf(int32(10)), reflect.TypeOf(int64(0))) {
-			t.Error("Expected int32 to int64 to be convertible")
-		}
-	})
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			if err := tc.Run(); err != nil {
+				t.Errorf("Test case failed: %v", err)
+			}
+		})
+	}
 }
 
 func TestPrepareArgs(t *testing.T) {
@@ -732,7 +769,7 @@ func TestPrepareArgs(t *testing.T) {
 
 func TestChainAddWithExistingError(t *testing.T) {
 	chain := NewChain()
-	chain.err = &ChainError{Message: "existing error"}
+	chain.err = &FlowError{Message: "existing error"}
 
 	chain.Add("step1", func() int {
 		return 10
@@ -745,7 +782,7 @@ func TestChainAddWithExistingError(t *testing.T) {
 
 func TestChainRunWithExistingError(t *testing.T) {
 	chain := NewChain()
-	chain.err = &ChainError{Message: "existing error"}
+	chain.err = &FlowError{Message: "existing error"}
 
 	chain.Add("step1", func() int {
 		return 10
@@ -759,7 +796,7 @@ func TestChainRunWithExistingError(t *testing.T) {
 
 func TestChainUseWithExistingError(t *testing.T) {
 	chain := NewChain()
-	chain.err = &ChainError{Message: "existing error"}
+	chain.err = &FlowError{Message: "existing error"}
 
 	newChain := chain.Use("step1")
 
@@ -839,7 +876,7 @@ func TestChainWithArray(t *testing.T) {
 
 func TestChainCallWithExistingError(t *testing.T) {
 	chain := NewChain()
-	chain.err = &ChainError{Message: "existing error"}
+	chain.err = &FlowError{Message: "existing error"}
 
 	fn := func() int { return 10 }
 	values := chain.call(reflect.ValueOf(fn), []reflect.Type{}, []reflect.Value{})
@@ -1016,16 +1053,16 @@ func TestChainWithStructValue(t *testing.T) {
 		t.Errorf("Expected TestStruct value")
 	}
 
-	if ts.Name != "test" || ts.Value != 42 {
+	if ts.Name != testString || ts.Value != 42 {
 		t.Errorf("Expected {Name: test, Value: 42}, got %+v", ts)
 	}
 }
 
-func TestChainErrorReturnWithMultipleValues(t *testing.T) {
+func TestFlowErrorReturnWithMultipleValues(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() (int, string, error) {
-		return 0, "", &ChainError{Message: "multi-value error"}
+		return 0, "", &FlowError{Message: "multi-value error"}
 	})
 
 	err := chain.Run()
@@ -1264,7 +1301,7 @@ func TestChainFunctionReturningErrorOnlyWithError(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() error {
-		return &ChainError{Message: "test error"}
+		return &FlowError{Message: testErrorMsg}
 	})
 
 	err := chain.Run()
@@ -1272,7 +1309,7 @@ func TestChainFunctionReturningErrorOnlyWithError(t *testing.T) {
 		t.Fatal("Expected error")
 	}
 
-	if err.Error() != "test error" {
+	if err.Error() != testErrorMsg {
 		t.Errorf("Expected 'test error', got '%v'", err.Error())
 	}
 }
@@ -1327,7 +1364,7 @@ func TestChainAddAfterError(t *testing.T) {
 	})
 
 	chain.Add("step2", func(x int) (int, error) {
-		return 0, &ChainError{Message: "test error"}
+		return 0, &FlowError{Message: testErrorMsg}
 	})
 
 	err := chain.Run()
@@ -1352,7 +1389,7 @@ func TestChainUseAfterError(t *testing.T) {
 	})
 
 	chain.Add("step2", func(x int) (int, error) {
-		return 0, &ChainError{Message: "test error"}
+		return 0, &FlowError{Message: testErrorMsg}
 	})
 
 	err := chain.Run()
@@ -1375,11 +1412,11 @@ func TestChainWithMultipleErrors(t *testing.T) {
 	})
 
 	chain.Add("step2", func(x int) (int, error) {
-		return 0, &ChainError{Message: "first error"}
+		return 0, &FlowError{Message: "first error"}
 	})
 
 	chain.Add("step3", func(x int) (int, error) {
-		return 0, &ChainError{Message: "second error"}
+		return 0, &FlowError{Message: "second error"}
 	})
 
 	err := chain.Run()
@@ -1402,7 +1439,7 @@ func TestChainStructWithMultipleFields(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() Data {
-		return Data{A: 10, B: "hello", C: true}
+		return Data{A: 10, B: testHelloMsg, C: true}
 	})
 
 	chain.Add("step2", func(d Data) Data {
@@ -1421,7 +1458,7 @@ func TestChainStructWithMultipleFields(t *testing.T) {
 	}
 
 	d := value.(Data)
-	if d.A != 20 || d.B != "hello" || d.C != true {
+	if d.A != 20 || d.B != testHelloMsg || d.C != true {
 		t.Errorf("Expected {20, hello, true}, got %+v", d)
 	}
 }
@@ -1447,7 +1484,7 @@ func TestChainWithInterfaceValue(t *testing.T) {
 	chain := NewChain()
 
 	chain.Add("step1", func() any {
-		return "hello"
+		return testHelloMsg
 	})
 
 	err := chain.Run()
@@ -1460,7 +1497,7 @@ func TestChainWithInterfaceValue(t *testing.T) {
 		t.Fatalf("Unexpected error getting value: %v", err)
 	}
 
-	if value.(string) != "hello" {
+	if value.(string) != testHelloMsg {
 		t.Errorf("Expected 'hello', got %v", value)
 	}
 }
@@ -1558,8 +1595,8 @@ func TestChainHandleNonFunctionTypeWithInterface(t *testing.T) {
 	}
 }
 
-func TestChainErrorType(t *testing.T) {
-	err := &ChainError{Message: "test error"}
+func TestFlowErrorType(t *testing.T) {
+	err := &FlowError{Message: "test error"}
 	if err.Error() != "test error" {
 		t.Errorf("Expected 'test error', got '%v'", err.Error())
 	}

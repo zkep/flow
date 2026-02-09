@@ -7,16 +7,12 @@ import (
 )
 
 const (
-	ErrArgTypeMismatch  = "argument type mismatch"
-	ErrArgCountMismatch = "argument count mismatch"
-	ErrNotFunction      = "argument is not a function"
-	ErrFunctionPanicked = "function panicked"
-	ErrStepNotFound     = "step not found"
-)
-
-var (
-	errorType = reflect.TypeOf((*error)(nil)).Elem()
-	argsPool  = NewSlicePool[reflect.Value](128, 32)
+	ErrArgTypeMismatch   = "argument type mismatch"
+	ErrArgCountMismatch  = "argument count mismatch"
+	ErrNotFunction       = "argument is not a function"
+	ErrFunctionPanicked  = "function panicked"
+	ErrStepNotFound      = "step not found"
+	defaultChainCapacity = 8
 )
 
 type (
@@ -38,9 +34,9 @@ type (
 
 func NewChain() *Chain {
 	return &Chain{
-		values:    make([]reflect.Value, 0, 8),
-		stepNames: make(map[string]int, 8),
-		handlers:  make([]*task, 0, 8),
+		values:    make([]reflect.Value, 0, defaultChainCapacity),
+		stepNames: make(map[string]int, defaultChainCapacity),
+		handlers:  make([]*task, 0, defaultChainCapacity),
 	}
 }
 
@@ -84,7 +80,7 @@ func (c *Chain) RunWithContext(ctx context.Context) error {
 		if !c.handlers[i].do {
 			select {
 			case <-ctx.Done():
-				c.err = &ChainError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
+				c.err = &FlowError{Message: fmt.Sprintf("execution canceled: %v", ctx.Err())}
 				return c.err
 			default:
 			}
@@ -120,13 +116,13 @@ func (c *Chain) call(fnValue reflect.Value, argTypes []reflect.Type, values []re
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				c.err = &ChainError{Message: fmt.Sprintf("%v: %v (fnType: %v, args: %v)", ErrFunctionPanicked, r, fnType, args)}
+				c.err = &FlowError{Message: fmt.Sprintf("%v: %v (fnType: %v, args: %v)", ErrFunctionPanicked, r, fnType, args)}
 			}
 		}()
 		results = fnValue.Call(args)
 	}()
 
-	argsPool.Put(args)
+	reflectValueSlicePool.Put(args)
 
 	if c.err != nil {
 		return values
@@ -134,7 +130,7 @@ func (c *Chain) call(fnValue reflect.Value, argTypes []reflect.Type, values []re
 
 	outCount := fnType.NumOut()
 	if len(results) > outCount {
-		c.err = &ChainError{Message: ErrFunctionPanicked}
+		c.err = &FlowError{Message: ErrFunctionPanicked}
 		return values
 	}
 
@@ -194,7 +190,7 @@ func (c *Chain) Values(name string) ([]any, error) {
 			return values, nil
 		}
 	}
-	return nil, &ChainError{Message: ErrStepNotFound}
+	return nil, &FlowError{Message: ErrStepNotFound}
 }
 
 func (c *Chain) Value(name string) (any, error) {
@@ -205,7 +201,7 @@ func (c *Chain) Value(name string) (any, error) {
 			}
 		}
 	}
-	return nil, &ChainError{Message: ErrStepNotFound}
+	return nil, &FlowError{Message: ErrStepNotFound}
 }
 
 func (c *Chain) Error() error {
@@ -226,7 +222,7 @@ func (c *Chain) Use(names ...string) *Chain {
 
 	for _, name := range names {
 		if idx, ok := c.stepNames[name]; !ok {
-			c.err = &ChainError{Message: ErrStepNotFound}
+			c.err = &FlowError{Message: ErrStepNotFound}
 			return c
 		} else {
 			newChain.values = append(newChain.values, c.handlers[idx].values...)
@@ -236,128 +232,4 @@ func (c *Chain) Use(names ...string) *Chain {
 	}
 
 	return newChain
-}
-
-type ChainError struct {
-	Message string
-}
-
-func (e *ChainError) Error() string {
-	return e.Message
-}
-
-func canConvert(from, to reflect.Type) bool {
-	if from == to {
-		return true
-	}
-	if from.AssignableTo(to) {
-		return true
-	}
-	if from.ConvertibleTo(to) {
-		return true
-	}
-	return false
-}
-
-func addArg(args *[]reflect.Value, val reflect.Value, argType reflect.Type) error {
-	if !val.IsValid() {
-		*args = append(*args, reflect.Zero(argType))
-		return nil
-	}
-	valType := val.Type()
-	if !valType.AssignableTo(argType) {
-		if !canConvert(valType, argType) {
-			return &ChainError{Message: ErrArgTypeMismatch}
-		}
-		*args = append(*args, val.Convert(argType))
-	} else {
-		*args = append(*args, val)
-	}
-	return nil
-}
-
-func prepareArgsWithType(values []reflect.Value, argTypes []reflect.Type) ([]reflect.Value, error) {
-	argCount := len(argTypes)
-	if argCount == 0 {
-		if len(values) > 0 {
-			return nil, &ChainError{Message: ErrArgCountMismatch}
-		}
-		return nil, nil
-	}
-
-	args := argsPool.Get(argCount)
-	if len(values) > 0 {
-		if argCount > 0 && len(values) == argCount {
-			for i := range len(values) {
-				if err := addArg(&args, values[i], argTypes[i]); err != nil {
-					argsPool.Put(args)
-					return nil, err
-				}
-			}
-		} else {
-			if argCount == 1 && argTypes[0].Kind() == reflect.Slice {
-				sliceType := argTypes[0]
-				sliceValue := reflect.MakeSlice(sliceType, len(values), len(values))
-				for i := range values {
-					elemType := sliceType.Elem()
-					val := values[i].Interface()
-					valValue := reflect.ValueOf(val)
-
-					if !valValue.IsValid() {
-						sliceValue.Index(i).Set(reflect.Zero(elemType))
-						continue
-					}
-
-					if !valValue.Type().AssignableTo(elemType) {
-						if valValue.CanConvert(elemType) {
-							valValue = valValue.Convert(elemType)
-						} else {
-							argsPool.Put(args)
-							return nil, &ChainError{Message: ErrArgTypeMismatch}
-						}
-					}
-					sliceValue.Index(i).Set(valValue)
-				}
-				args = append(args, sliceValue)
-			} else {
-				currentValue := values[0].Interface()
-				currentValueType := reflect.TypeOf(currentValue)
-				currentValueValue := reflect.ValueOf(currentValue)
-
-				if currentValueType == nil {
-					if argCount > 0 {
-						args = append(args, reflect.Zero(argTypes[0]))
-					}
-				} else if currentValueType.Kind() == reflect.Slice || currentValueType.Kind() == reflect.Array {
-					elemCount := currentValueValue.Len()
-					if argCount > 0 && elemCount != argCount {
-						argsPool.Put(args)
-						return nil, &ChainError{Message: ErrArgCountMismatch}
-					}
-
-					for i := range elemCount {
-						elem := currentValueValue.Index(i)
-						if elem.Kind() == reflect.Interface {
-							elem = elem.Elem()
-						}
-						args = append(args, elem)
-					}
-				} else {
-					if argCount > 0 {
-						if err := addArg(&args, reflect.ValueOf(currentValue), argTypes[0]); err != nil {
-							argsPool.Put(args)
-							return nil, err
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if len(args) != argCount {
-		argsPool.Put(args)
-		return nil, &ChainError{Message: ErrArgCountMismatch}
-	}
-
-	return args, nil
 }

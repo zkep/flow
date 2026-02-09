@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/zkep/flow"
 )
@@ -15,14 +17,45 @@ import (
 //go:embed approval_flow.json
 var ApprovalFlowJSONData []byte
 
+type FlowStatus int
+
+const (
+	FlowStatusIdle FlowStatus = iota
+	FlowStatusRunning
+	FlowStatusPaused
+	FlowStatusCompleted
+	FlowStatusRejected
+	FlowStatusReturned
+)
+
+type ApprovalType string
+
+const (
+	ApprovalTypeSingle   ApprovalType = "single"
+	ApprovalTypeAll      ApprovalType = "all"
+	ApprovalTypeAny      ApprovalType = "any"
+	ApprovalTypeParallel ApprovalType = "parallel"
+)
+
+type ApproverDecision struct {
+	Approver   string
+	Approved   bool
+	Comment    string
+	DecisionAt time.Time
+}
+
 type ApprovalNode struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Label     string `json:"label"`
-	Action    string `json:"action,omitempty"`
-	Condition string `json:"condition,omitempty"`
-	TrueEdge  string `json:"true_edge,omitempty"`
-	FalseEdge string `json:"false_edge,omitempty"`
+	ID           string            `json:"id"`
+	Type         string            `json:"type"`
+	Label        string            `json:"label"`
+	Action       string            `json:"action,omitempty"`
+	Condition    string            `json:"condition,omitempty"`
+	TrueEdge     string            `json:"true_edge,omitempty"`
+	FalseEdge    string            `json:"false_edge,omitempty"`
+	ApprovalType ApprovalType      `json:"approval_type,omitempty"`
+	Approvers    []string          `json:"approvers,omitempty"`
+	ReturnTarget string            `json:"return_target,omitempty"`
+	Config       map[string]string `json:"config,omitempty"`
 }
 
 type ApprovalEdge struct {
@@ -39,11 +72,85 @@ type ApprovalFlow struct {
 }
 
 type ApprovalContext struct {
-	Applicant string
-	Days      int
-	Reason    string
-	Approved  bool
-	Comments  map[string]string
+	Applicant     string
+	Days          int
+	Reason        string
+	Approved      bool
+	Comments      map[string]string
+	Decisions     map[string]*ApproverDecision
+	CurrentNode   string
+	ReturnedFrom  string
+	ResubmitCount int
+	Status        FlowStatus
+	PausedAt      time.Time
+	ResumedAt     time.Time
+	ApprovalType  ApprovalType
+	RequiredCount int
+	ApprovedCount int
+	mu            sync.RWMutex
+}
+
+func NewApprovalContext(applicant string, days int, reason string) *ApprovalContext {
+	return &ApprovalContext{
+		Applicant:     applicant,
+		Days:          days,
+		Reason:        reason,
+		Approved:      false,
+		Comments:      make(map[string]string),
+		Decisions:     make(map[string]*ApproverDecision),
+		Status:        FlowStatusIdle,
+		ApprovalType:  ApprovalTypeSingle,
+		RequiredCount: 1,
+		ApprovedCount: 0,
+	}
+}
+
+func (ctx *ApprovalContext) SetStatus(status FlowStatus) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.Status = status
+}
+
+func (ctx *ApprovalContext) GetStatus() FlowStatus {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	return ctx.Status
+}
+
+func (ctx *ApprovalContext) RecordDecision(approver string, approved bool, comment string) {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.Decisions[approver] = &ApproverDecision{
+		Approver:   approver,
+		Approved:   approved,
+		Comment:    comment,
+		DecisionAt: time.Now(),
+	}
+	if approved {
+		ctx.ApprovedCount++
+	}
+	ctx.Comments[approver] = comment
+}
+
+func (ctx *ApprovalContext) IsAllApproved() bool {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	return ctx.ApprovedCount >= ctx.RequiredCount && ctx.RequiredCount > 0
+}
+
+func (ctx *ApprovalContext) IsAnyApproved() bool {
+	ctx.mu.RLock()
+	defer ctx.mu.RUnlock()
+	return ctx.ApprovedCount > 0
+}
+
+func (ctx *ApprovalContext) ResetForResubmit() {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.Approved = false
+	ctx.ResubmitCount++
+	ctx.Decisions = make(map[string]*ApproverDecision)
+	ctx.ApprovedCount = 0
 }
 
 type ActionHandler func(*ApprovalContext) error
@@ -75,6 +182,203 @@ func (r *ActionRegistry) List() []string {
 	return names
 }
 
+type ApprovalFlowEngine struct {
+	flow         *ApprovalFlow
+	ctx          *ApprovalContext
+	registry     *ActionRegistry
+	graph        *flow.Graph
+	pauseSignal  *flow.SimplePauseSignal
+	checkpoint   *flow.MemoryCheckpointStore
+	currentNode  string
+	returnTarget string
+	isReturned   bool
+	mu           sync.RWMutex
+}
+
+func NewApprovalFlowEngine(approvalFlow *ApprovalFlow, ctx *ApprovalContext, registry *ActionRegistry) *ApprovalFlowEngine {
+	return &ApprovalFlowEngine{
+		flow:        approvalFlow,
+		ctx:         ctx,
+		registry:    registry,
+		graph:       flow.NewGraph(),
+		pauseSignal: flow.NewSimplePauseSignal(),
+		checkpoint:  flow.NewMemoryCheckpointStore(),
+	}
+}
+
+func (e *ApprovalFlowEngine) Pause() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pauseSignal.SetPaused(true)
+	e.ctx.SetStatus(FlowStatusPaused)
+	e.ctx.PausedAt = time.Now()
+	fmt.Printf("\n  [System] Flow paused at node: %s\n", e.currentNode)
+	return nil
+}
+
+func (e *ApprovalFlowEngine) Resume() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pauseSignal.SetPaused(false)
+	e.ctx.SetStatus(FlowStatusRunning)
+	e.ctx.ResumedAt = time.Now()
+	fmt.Printf("\n  [System] Flow resumed from node: %s\n", e.currentNode)
+	return e.graph.Resume(nil)
+}
+
+func (e *ApprovalFlowEngine) ReturnTo(targetNode string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.returnTarget = targetNode
+	e.isReturned = true
+	e.ctx.ReturnedFrom = e.currentNode
+	e.ctx.SetStatus(FlowStatusReturned)
+	fmt.Printf("\n  [System] Flow returned from %s to %s\n", e.currentNode, targetNode)
+	return nil
+}
+
+func (e *ApprovalFlowEngine) Resubmit() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.isReturned {
+		return errors.New("flow is not in returned state")
+	}
+	e.ctx.ResetForResubmit()
+	e.ctx.SetStatus(FlowStatusRunning)
+	e.isReturned = false
+	e.returnTarget = ""
+	fmt.Printf("\n  [System] Flow resubmitted (resubmit count: %d)\n", e.ctx.ResubmitCount)
+	return e.Run()
+}
+
+func (e *ApprovalFlowEngine) SaveCheckpoint(key string) error {
+	cp, err := e.graph.SaveCheckpoint()
+	if err != nil {
+		return err
+	}
+	cp.SetMetadata("currentNode", e.currentNode)
+	cp.SetMetadata("applicant", e.ctx.Applicant)
+	return e.checkpoint.Save(key, cp)
+}
+
+func (e *ApprovalFlowEngine) LoadCheckpoint(key string) error {
+	cp, err := e.checkpoint.Load(key)
+	if err != nil {
+		return err
+	}
+	if err := e.graph.LoadCheckpoint(cp); err != nil {
+		return err
+	}
+	if nodeName, ok := cp.GetMetadata("currentNode"); ok {
+		e.currentNode = nodeName
+	}
+	return nil
+}
+
+func (e *ApprovalFlowEngine) buildGraph() error {
+	g := flow.NewGraph()
+	e.graph = g
+
+	g.SetPauseSignal(e.pauseSignal)
+
+	nodeMap := make(map[string]*ApprovalNode)
+	for i := range e.flow.Nodes {
+		nodeMap[e.flow.Nodes[i].ID] = &e.flow.Nodes[i]
+	}
+
+	for _, node := range e.flow.Nodes {
+		handler, _ := e.registry.Get(node.Action)
+
+		g.AddNode(node.ID, func() error {
+			e.mu.Lock()
+			e.currentNode = node.ID
+			e.ctx.CurrentNode = node.ID
+			e.mu.Unlock()
+
+			fmt.Printf("\n[%s] %s\n", node.ID, node.Label)
+			fmt.Println("  " + strings.Repeat("-", 40))
+
+			if e.isReturned && e.returnTarget == node.ID {
+				fmt.Printf("  [Returned] Flow returned to this node for reprocessing\n")
+				e.isReturned = false
+				e.returnTarget = ""
+			}
+
+			if handler != nil {
+				if err := handler(e.ctx); err != nil {
+					return err
+				}
+			}
+
+			if node.Type == "condition" {
+				fmt.Printf("  [Condition] %s\n", node.Condition)
+			}
+
+			if node.ApprovalType != "" {
+				e.ctx.ApprovalType = node.ApprovalType
+				e.ctx.RequiredCount = len(node.Approvers)
+				fmt.Printf("  [Approval Type] %s, Required Approvers: %d\n", node.ApprovalType, len(node.Approvers))
+			}
+
+			return nil
+		})
+	}
+
+	for _, edge := range e.flow.Edges {
+		if edge.Condition != "" {
+			condition := edge.Condition
+			g.AddEdgeWithCondition(edge.From, edge.To, func() bool {
+				result, err := evalCondition(condition, e.ctx)
+				if err != nil {
+					fmt.Printf("  [Warning] condition evaluation failed: %v\n", err)
+					return false
+				}
+				return result
+			})
+		} else {
+			g.AddEdge(edge.From, edge.To)
+		}
+	}
+
+	return nil
+}
+
+func (e *ApprovalFlowEngine) Run() error {
+	if err := e.buildGraph(); err != nil {
+		return fmt.Errorf("failed to build graph: %w", err)
+	}
+
+	e.ctx.SetStatus(FlowStatusRunning)
+
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Printf("Flow Name: %s\n", e.flow.Name)
+	fmt.Printf("Description: %s\n", e.flow.Description)
+	fmt.Println(strings.Repeat("=", 60))
+
+	err := e.graph.Run()
+	if err != nil {
+		if errors.Is(err, flow.ErrFlowPaused) {
+			e.ctx.SetStatus(FlowStatusPaused)
+			return nil
+		}
+		e.ctx.SetStatus(FlowStatusRejected)
+		return fmt.Errorf("flow execution failed: %w", err)
+	}
+
+	e.ctx.SetStatus(FlowStatusCompleted)
+	return nil
+}
+
+func (e *ApprovalFlowEngine) GetState() FlowStatus {
+	return e.ctx.GetStatus()
+}
+
+func (e *ApprovalFlowEngine) CurrentNode() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.currentNode
+}
+
 func formatApproved(approved bool) string {
 	if approved {
 		return "Approved"
@@ -92,6 +396,12 @@ func getValue(key string, ctx *ApprovalContext) interface{} {
 		return ctx.Applicant
 	case "reason":
 		return ctx.Reason
+	case "resubmit_count":
+		return ctx.ResubmitCount
+	case "approved_count":
+		return ctx.ApprovedCount
+	case "required_count":
+		return ctx.RequiredCount
 	}
 	return nil
 }
@@ -242,55 +552,6 @@ func LoadApprovalFlow(path string) (*ApprovalFlow, error) {
 	return LoadApprovalFlowFromData(data)
 }
 
-func BuildAndRunFlow(approvalFlow *ApprovalFlow, ctx *ApprovalContext, registry *ActionRegistry) error {
-	g := flow.NewGraph()
-
-	for _, node := range approvalFlow.Nodes {
-		handler, _ := registry.Get(node.Action)
-		g.AddNode(node.ID, func() error {
-			fmt.Printf("\n[%s] %s\n", node.ID, node.Label)
-			fmt.Println("  " + strings.Repeat("-", 40))
-
-			if handler != nil {
-				return handler(ctx)
-			}
-
-			if node.Type == "condition" {
-				fmt.Printf("  [Condition] %s\n", node.Condition)
-			}
-			return nil
-		})
-	}
-
-	for _, edge := range approvalFlow.Edges {
-		if edge.Condition != "" {
-			condition := edge.Condition
-			g.AddEdgeWithCondition(edge.From, edge.To, func() bool {
-				result, err := evalCondition(condition, ctx)
-				if err != nil {
-					fmt.Printf("  [Warning] condition evaluation failed: %v\n", err)
-					return false
-				}
-				return result
-			})
-		} else {
-			g.AddEdge(edge.From, edge.To)
-		}
-	}
-
-	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Printf("Flow Name: %s\n", approvalFlow.Name)
-	fmt.Printf("Description: %s\n", approvalFlow.Description)
-	fmt.Println(strings.Repeat("=", 60))
-
-	err := g.Run()
-	if err != nil {
-		return fmt.Errorf("flow execution failed: %w", err)
-	}
-
-	return nil
-}
-
 func NewDefaultActionRegistry() *ActionRegistry {
 	registry := NewActionRegistry()
 
@@ -337,6 +598,71 @@ func NewDefaultActionRegistry() *ActionRegistry {
 		return nil
 	})
 
+	registry.Register("countersign_approve", func(ctx *ApprovalContext) error {
+		fmt.Printf("  [Countersign] Requires all %d approvers to approve\n", ctx.RequiredCount)
+		for i, approver := range []string{"Dept Head", "Finance", "HR"} {
+			if i >= ctx.RequiredCount {
+				break
+			}
+			approved := true
+			comment := fmt.Sprintf("%s approved", approver)
+			ctx.RecordDecision(approver, approved, comment)
+			fmt.Printf("    - [%s] %s\n", approver, comment)
+		}
+		ctx.Approved = ctx.IsAllApproved()
+		fmt.Printf("  [Countersign Result] All approved: %v\n", ctx.Approved)
+		return nil
+	})
+
+	registry.Register("parallel_approve", func(ctx *ApprovalContext) error {
+		fmt.Printf("  [Parallel] Any of %d approvers can approve\n", ctx.RequiredCount)
+		for i, approver := range []string{"Director A", "Director B", "Director C"} {
+			if i >= ctx.RequiredCount {
+				break
+			}
+			approved := i == 0
+			comment := fmt.Sprintf("%s decision", approver)
+			if approved {
+				comment = "Approved"
+			}
+			ctx.RecordDecision(approver, approved, comment)
+			if approved {
+				fmt.Printf("    - [%s] %s (first approval, others skipped)\n", approver, comment)
+				break
+			}
+			fmt.Printf("    - [%s] %s\n", approver, comment)
+		}
+		ctx.Approved = ctx.IsAnyApproved()
+		fmt.Printf("  [Parallel Result] Any approved: %v\n", ctx.Approved)
+		return nil
+	})
+
+	registry.Register("handle_return", func(ctx *ApprovalContext) error {
+		fmt.Printf("  [Return] Application returned from %s\n", ctx.ReturnedFrom)
+		fmt.Printf("  [Return] Current resubmit count: %d\n", ctx.ResubmitCount)
+		if ctx.ResubmitCount >= 3 {
+			ctx.Approved = false
+			fmt.Println("  [Return] Max resubmit count reached, rejecting...")
+			return errors.New("max resubmit count exceeded")
+		}
+		return nil
+	})
+
+	registry.Register("resubmit_request", func(ctx *ApprovalContext) error {
+		fmt.Printf("  [Resubmit] Preparing resubmission (attempt %d)...\n", ctx.ResubmitCount+1)
+		ctx.Reason = ctx.Reason + " (updated)"
+		fmt.Printf("  [Resubmit] Updated reason: %s\n", ctx.Reason)
+		return nil
+	})
+
+	registry.Register("ceo_approval", func(ctx *ApprovalContext) error {
+		fmt.Printf("  [CEO Approval] Reviewing high-value request for %s (%d days)...\n", ctx.Applicant, ctx.Days)
+		ctx.Approved = true
+		ctx.Comments["ceo"] = "Approved for business needs"
+		fmt.Printf("  [CEO] Decision: %s, Comment: %s\n", formatApproved(ctx.Approved), ctx.Comments["ceo"])
+		return nil
+	})
+
 	return registry
 }
 
@@ -349,34 +675,75 @@ func main() {
 
 	registry := NewDefaultActionRegistry()
 
-	testCases := []*ApprovalContext{
+	testCases := []struct {
+		name string
+		ctx  *ApprovalContext
+		run  func(*ApprovalFlowEngine) error
+	}{
 		{
-			Applicant: "Zhang San",
-			Days:      2,
-			Reason:    "Family matters",
-			Comments:  make(map[string]string),
+			name: "Normal Flow (3 days)",
+			ctx:  NewApprovalContext("Zhang San", 3, "Family matters"),
+			run:  nil,
 		},
 		{
-			Applicant: "Li Si",
-			Days:      5,
-			Reason:    "Annual leave",
-			Comments:  make(map[string]string),
+			name: "Normal Flow (5 days)",
+			ctx:  NewApprovalContext("Li Si", 5, "Annual leave"),
+			run:  nil,
+		},
+		{
+			name: "Pause/Resume Test",
+			ctx:  NewApprovalContext("Wang Wu", 2, "Sick leave"),
+			run: func(engine *ApprovalFlowEngine) error {
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					fmt.Println("\n  [External] Pausing flow...")
+					engine.Pause()
+				}()
+
+				if err := engine.Run(); err != nil {
+					return err
+				}
+
+				if engine.GetState() == FlowStatusPaused {
+					fmt.Printf("  [Test] Flow paused at node: %s\n", engine.CurrentNode())
+					time.Sleep(500 * time.Millisecond)
+					fmt.Println("  [Test] Resuming flow...")
+					return engine.Resume()
+				}
+				return nil
+			},
+		},
+		{
+			name: "Countersign Test (All approve)",
+			ctx:  NewApprovalContext("Zhao Liu", 10, "Long vacation"),
+			run:  nil,
+		},
+		{
+			name: "Parallel Sign Test (Any approve)",
+			ctx:  NewApprovalContext("Sun Qi", 7, "Business trip"),
+			run:  nil,
 		},
 	}
 
-	for i, testCase := range testCases {
+	for i, tc := range testCases {
 		fmt.Printf("\n\n")
 		fmt.Println(strings.Repeat("#", 60))
-		fmt.Printf("## Test Case %d\n", i+1)
+		fmt.Printf("## Test Case %d: %s\n", i+1, tc.name)
 		fmt.Println(strings.Repeat("#", 60))
 
-		testCase.Comments = make(map[string]string)
+		engine := NewApprovalFlowEngine(approvalFlow, tc.ctx, registry)
 
-		err := BuildAndRunFlow(approvalFlow, testCase, registry)
-		if err != nil {
-			fmt.Printf("Execution failed: %v\n", err)
+		if tc.run != nil {
+			if err := tc.run(engine); err != nil {
+				fmt.Printf("Execution failed: %v\n", err)
+			}
+		} else {
+			if err := engine.Run(); err != nil {
+				fmt.Printf("Execution failed: %v\n", err)
+			}
 		}
 
+		fmt.Printf("\n  [Final State] %v\n", engine.GetState())
 		fmt.Println("\n")
 	}
 

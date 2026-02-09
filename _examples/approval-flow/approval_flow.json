@@ -1,6 +1,6 @@
 {
   "name": "Leave Approval Flow",
-  "description": "Employee leave approval workflow with multi-level approval support",
+  "description": "Employee leave approval workflow with multi-level approval, countersign, parallel sign, and return/resubmit support",
   "nodes": [
     {
       "id": "start",
@@ -33,6 +33,38 @@
       "type": "task",
       "label": "Manager Approval",
       "action": "manager_approve"
+    },
+    {
+      "id": "long_vacation_check",
+      "type": "condition",
+      "label": "Long Vacation Check",
+      "condition": "days > 7",
+      "true_edge": "countersign_approval",
+      "false_edge": "parallel_approval_check"
+    },
+    {
+      "id": "parallel_approval_check",
+      "type": "condition",
+      "label": "Parallel Check",
+      "condition": "days > 5",
+      "true_edge": "parallel_approval",
+      "false_edge": "hr_review"
+    },
+    {
+      "id": "countersign_approval",
+      "type": "countersign",
+      "label": "Countersign Approval",
+      "action": "countersign_approve",
+      "approval_type": "all",
+      "approvers": ["Dept Head", "Finance", "HR"]
+    },
+    {
+      "id": "parallel_approval",
+      "type": "parallel",
+      "label": "Parallel Approval",
+      "action": "parallel_approve",
+      "approval_type": "any",
+      "approvers": ["Director A", "Director B", "Director C"]
     },
     {
       "id": "hr_review",
@@ -84,11 +116,51 @@
     },
     {
       "from": "manager_approval",
-      "to": "hr_review",
+      "to": "long_vacation_check",
       "condition": "approved == true"
     },
     {
       "from": "manager_approval",
+      "to": "rejected",
+      "condition": "approved == false"
+    },
+    {
+      "from": "long_vacation_check",
+      "to": "countersign_approval",
+      "condition": "days > 7"
+    },
+    {
+      "from": "long_vacation_check",
+      "to": "parallel_approval_check",
+      "condition": "days <= 7"
+    },
+    {
+      "from": "parallel_approval_check",
+      "to": "parallel_approval",
+      "condition": "days > 5"
+    },
+    {
+      "from": "parallel_approval_check",
+      "to": "hr_review",
+      "condition": "days <= 5"
+    },
+    {
+      "from": "countersign_approval",
+      "to": "hr_review",
+      "condition": "approved == true"
+    },
+    {
+      "from": "countersign_approval",
+      "to": "rejected",
+      "condition": "approved == false"
+    },
+    {
+      "from": "parallel_approval",
+      "to": "hr_review",
+      "condition": "approved == true"
+    },
+    {
+      "from": "parallel_approval",
       "to": "rejected",
       "condition": "approved == false"
     },

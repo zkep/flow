@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	testNodeNameStart = "start"
+	testStringVal     = "test"
+)
+
 type TestData struct {
 	Value  int
 	Status string
@@ -78,17 +83,19 @@ func TestGraphValuePropagation(t *testing.T) {
 
 	runGraphSequential(t, graph)
 
-	multiplyValue := graph.NodeResult("multiply")[0].(TestData)
+	multiplyResult, _ := graph.NodeResult("multiply")
+	multiplyValue := multiplyResult[0].(TestData)
 	assertEqual(t, 20, multiplyValue.Value)
 
-	addValue := graph.NodeResult("add")[0].(TestData)
+	addResult, _ := graph.NodeResult("add")
+	addValue := addResult[0].(TestData)
 	assertEqual(t, 25, addValue.Value)
 }
 
 func TestBasicGraphCreation(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() string { return "start" })
+	graph.AddNode(testNodeNameStart, func() string { return testNodeNameStart })
 	graph.AddNode("process1", func(s string) string { return s + " -> process1" })
 	graph.AddNode("process2", func(s string) string { return s + " -> process2" })
 	graph.AddNode("end", func(s string) {})
@@ -113,7 +120,7 @@ func TestGraphNodeError(t *testing.T) {
 
 	graph.AddNode("start", func() int { return 10 })
 	graph.AddNode("error_step", func(n int) (int, error) {
-		return 0, &ChainError{Message: "test error"}
+		return 0, &FlowError{Message: "test error"}
 	})
 
 	graph.AddEdge("start", "error_step")
@@ -125,13 +132,13 @@ func TestGraphNodeError(t *testing.T) {
 func TestGraphNodeTypes(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() string { return "start" })
+	graph.AddNode(testNodeNameStart, func() string { return testNodeNameStart })
 	graph.AddNode("branch", func(s string) string { return s })
 	graph.AddNode("parallel", func(s string) string { return s })
 	graph.AddNode("normal", func(s string) string { return s })
 	graph.AddNode("end", func(s string) {})
 
-	graph.AddEdge("start", "branch")
+	graph.AddEdge(testNodeNameStart, "branch")
 	graph.AddEdge("branch", "parallel")
 	graph.AddEdge("parallel", "normal")
 	graph.AddEdge("normal", "end")
@@ -144,7 +151,7 @@ func TestGraphNodeTypes(t *testing.T) {
 func TestGraphWithMultiReturn(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() (int, string) { return 10, "test" })
+	graph.AddNode(testNodeNameStart, func() (int, string) { return 10, testStringVal })
 	graph.AddNode("process", func(a int, s string) (string, int, bool) { return s + "-processed", a * 2, true })
 	graph.AddNode("verify", func(s string, a int, b bool) string {
 		if b {
@@ -160,10 +167,54 @@ func TestGraphWithMultiReturn(t *testing.T) {
 
 	runGraphSequential(t, graph)
 
-	processResult := graph.NodeResult("process")
+	processResult, _ := graph.NodeResult("process")
 	assertEqual(t, 3, len(processResult))
 	assertEqual(t, "test-processed", processResult[0].(string))
 	assertEqual(t, 20, processResult[1].(int))
+}
+
+type ConditionBranchTestCase struct {
+	Name     string
+	Input    int
+	Expected string
+}
+
+func (tc ConditionBranchTestCase) Run() error {
+	graph := NewGraph()
+	graph.AddNode("start", func() int { return tc.Input })
+	graph.AddNode("branch", func(n int) int { return n })
+	graph.AddNode("high", func(n int) string { return "high" })
+	graph.AddNode("medium", func(n int) string { return "medium" })
+	graph.AddNode("low", func(n int) string { return "low" })
+
+	graph.AddEdge("start", "branch")
+	graph.AddEdgeWithCondition("branch", "high", func(b int) bool { return b >= 50 })
+	graph.AddEdgeWithCondition("branch", "medium", func(b int) bool { return b >= 20 && b < 50 })
+	graph.AddEdgeWithCondition("branch", "low", func(b int) bool { return b < 20 })
+
+	if err := graph.RunWithContext(context.Background()); err != nil {
+		return fmt.Errorf("unexpected error: %w", err)
+	}
+
+	highStatus, _ := graph.NodeStatus("high")
+	mediumStatus, _ := graph.NodeStatus("medium")
+	lowStatus, _ := graph.NodeStatus("low")
+
+	switch tc.Expected {
+	case "high":
+		if highStatus != NodeStatusCompleted {
+			return fmt.Errorf("expected high node to be completed, got %v", highStatus)
+		}
+	case "medium":
+		if mediumStatus != NodeStatusCompleted {
+			return fmt.Errorf("expected medium node to be completed, got %v", mediumStatus)
+		}
+	case "low":
+		if lowStatus != NodeStatusCompleted {
+			return fmt.Errorf("expected low node to be completed, got %v", lowStatus)
+		}
+	}
+	return nil
 }
 
 func TestGraphWithConditionBranch(t *testing.T) {
@@ -187,52 +238,16 @@ func TestGraphWithConditionBranch(t *testing.T) {
 	})
 
 	t.Run("MultipleConditions", func(t *testing.T) {
-		testCases := []struct {
-			name     string
-			input    int
-			expected string
-		}{
-			{"high", 60, "high"},
-			{"medium", 30, "medium"},
-			{"low", 10, "low"},
+		testCases := []ConditionBranchTestCase{
+			{Name: "high", Input: 60, Expected: "high"},
+			{Name: "medium", Input: 30, Expected: "medium"},
+			{Name: "low", Input: 10, Expected: "low"},
 		}
 
 		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				graph := NewGraph()
-				graph.AddNode("start", func() int { return tc.input })
-				graph.AddNode("branch", func(n int) int { return n })
-				graph.AddNode("high", func(n int) string { return "high" })
-				graph.AddNode("medium", func(n int) string { return "medium" })
-				graph.AddNode("low", func(n int) string { return "low" })
-
-				graph.AddEdge("start", "branch")
-				graph.AddEdgeWithCondition("branch", "high", func(b int) bool { return b >= 50 })
-				graph.AddEdgeWithCondition("branch", "medium", func(b int) bool { return b >= 20 && b < 50 })
-				graph.AddEdgeWithCondition("branch", "low", func(b int) bool { return b < 20 })
-
-				err := graph.RunWithContext(context.Background())
-				if err != nil {
-					t.Errorf("Expected no error, got %v", err)
-				}
-
-				highStatus := graph.NodeStatus("high")
-				mediumStatus := graph.NodeStatus("medium")
-				lowStatus := graph.NodeStatus("low")
-
-				switch tc.expected {
-				case "high":
-					if highStatus != NodeStatusCompleted {
-						t.Errorf("Expected high node to be completed")
-					}
-				case "medium":
-					if mediumStatus != NodeStatusCompleted {
-						t.Errorf("Expected medium node to be completed")
-					}
-				case "low":
-					if lowStatus != NodeStatusCompleted {
-						t.Errorf("Expected low node to be completed")
-					}
+			t.Run(tc.Name, func(t *testing.T) {
+				if err := tc.Run(); err != nil {
+					t.Errorf("Test case failed: %v", err)
 				}
 			})
 		}
@@ -242,8 +257,8 @@ func TestGraphWithConditionBranch(t *testing.T) {
 func TestGraphWithNoCondition(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() string {
-		return "start"
+	graph.AddNode(testNodeNameStart, func() string {
+		return testNodeNameStart
 	})
 
 	graph.AddNode("step1", func(s string) string {
@@ -254,7 +269,7 @@ func TestGraphWithNoCondition(t *testing.T) {
 		return s + " -> step2"
 	})
 
-	graph.AddEdge("start", "step1")
+	graph.AddEdge(testNodeNameStart, "step1")
 	graph.AddEdge("step1", "step2")
 
 	err := graph.RunWithContext(context.Background())
@@ -262,7 +277,7 @@ func TestGraphWithNoCondition(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	step2Status := graph.NodeStatus("step2")
+	step2Status, _ := graph.NodeStatus("step2")
 	if step2Status != NodeStatusCompleted {
 		t.Errorf("Expected step2 node to be completed")
 	}
@@ -306,7 +321,7 @@ func TestGraphParallelExecution(t *testing.T) {
 		t.Logf("Warning: parallel execution took %v", elapsed)
 	}
 
-	combineResult := graph.NodeResult("combine")
+	combineResult, _ := graph.NodeResult("combine")
 	if len(combineResult) != 1 {
 		t.Fatalf("Expected combine to have 1 result, got %d", len(combineResult))
 	}
@@ -328,7 +343,7 @@ func TestGraphErrorPropagation(t *testing.T) {
 	})
 
 	graph.AddNode("error_node", func(n int) (int, error) {
-		return 0, &ChainError{Message: "test error"}
+		return 0, &FlowError{Message: "test error"}
 	})
 
 	graph.AddNode("process2", func(n int) int {
@@ -344,12 +359,12 @@ func TestGraphErrorPropagation(t *testing.T) {
 		t.Errorf("Expected error to be propagated")
 	}
 
-	errorNodeStatus := graph.NodeStatus("error_node")
+	errorNodeStatus, _ := graph.NodeStatus("error_node")
 	if errorNodeStatus != NodeStatusFailed {
 		t.Errorf("Expected error node to be failed, got %v", errorNodeStatus)
 	}
 
-	process2Status := graph.NodeStatus("process2")
+	process2Status, _ := graph.NodeStatus("process2")
 	if process2Status != NodeStatusPending {
 		t.Errorf("Expected process2 node to be pending, got %v", process2Status)
 	}
@@ -424,14 +439,14 @@ func TestGraphWithNoStartNode(t *testing.T) {
 func TestGraphStatusTracking(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() string { return "start" })
+	graph.AddNode(testNodeNameStart, func() string { return testNodeNameStart })
 	graph.AddNode("process", func(s string) string { return s + " -> processed" })
 	graph.AddNode("end", func(s string) {})
 
-	graph.AddEdge("start", "process")
+	graph.AddEdge(testNodeNameStart, "process")
 	graph.AddEdge("process", "end")
 
-	startStatus := graph.NodeStatus("start")
+	startStatus, _ := graph.NodeStatus(testNodeNameStart)
 	if startStatus != NodeStatusPending {
 		t.Errorf("Expected start node to be pending")
 	}
@@ -441,17 +456,17 @@ func TestGraphStatusTracking(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	startStatus = graph.NodeStatus("start")
+	startStatus, _ = graph.NodeStatus(testNodeNameStart)
 	if startStatus != NodeStatusCompleted {
 		t.Errorf("Expected start node to be completed")
 	}
 
-	processStatus := graph.NodeStatus("process")
+	processStatus, _ := graph.NodeStatus("process")
 	if processStatus != NodeStatusCompleted {
 		t.Errorf("Expected process node to be completed")
 	}
 
-	endStatus := graph.NodeStatus("end")
+	endStatus, _ := graph.NodeStatus("end")
 	if endStatus != NodeStatusCompleted {
 		t.Errorf("Expected end node to be completed")
 	}
@@ -460,28 +475,28 @@ func TestGraphStatusTracking(t *testing.T) {
 func TestGraphClearStatus(t *testing.T) {
 	graph := NewGraph()
 
-	graph.AddNode("start", func() string { return "start" })
+	graph.AddNode(testNodeNameStart, func() string { return testNodeNameStart })
 	graph.AddNode("process", func(s string) string { return s })
-	graph.AddEdge("start", "process")
+	graph.AddEdge(testNodeNameStart, "process")
 
 	err := graph.RunWithContext(context.Background())
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	startStatus := graph.NodeStatus("start")
+	startStatus, _ := graph.NodeStatus(testNodeNameStart)
 	if startStatus != NodeStatusCompleted {
 		t.Errorf("Expected start node to be completed before clear")
 	}
 
 	graph.ClearStatus()
 
-	startStatus = graph.NodeStatus("start")
+	startStatus, _ = graph.NodeStatus(testNodeNameStart)
 	if startStatus != NodeStatusPending {
 		t.Errorf("Expected start node to be pending after clear")
 	}
 
-	processStatus := graph.NodeStatus("process")
+	processStatus, _ := graph.NodeStatus("process")
 	if processStatus != NodeStatusPending {
 		t.Errorf("Expected process node to be pending after clear")
 	}
@@ -519,42 +534,53 @@ func TestGraphStringOutput(t *testing.T) {
 	}
 }
 
+type EvaluateConditionTestCase struct {
+	Name           string
+	Condition      any
+	ExpectComplete bool
+}
+
+func (tc EvaluateConditionTestCase) Run() error {
+	graph := NewGraph()
+
+	graph.AddNode("start", func() (int, int) { return 10, 20 })
+	graph.AddNode("step1", func(a, b int) int { return a + b })
+
+	graph.AddEdgeWithCondition("start", "step1", tc.Condition)
+
+	if err := graph.RunWithContext(context.Background()); err != nil {
+		return fmt.Errorf("unexpected error: %w", err)
+	}
+
+	status, _ := graph.NodeStatus("step1")
+	if tc.ExpectComplete {
+		if status != NodeStatusCompleted {
+			return fmt.Errorf("expected step1 to be completed, got %v", status)
+		}
+	} else {
+		if status != NodeStatusPending {
+			return fmt.Errorf("expected step1 to be pending, got %v", status)
+		}
+	}
+	return nil
+}
+
 func TestGraphEvaluateCondition(t *testing.T) {
-	testCases := []struct {
-		name           string
-		condition      any
-		expectComplete bool
-	}{
-		{"BoolTrue", true, true},
-		{"BoolFalse", false, false},
-		{"StringValue", "condition", true},
-		{"FuncReturnBool", func(n int) bool { return true }, true},
-		{"FuncReturnBoolFalse", func(n int) bool { return false }, false},
-		{"FuncReturnString", func(n int) string { return "condition" }, true},
-		{"VariadicFunc", func(args ...int) bool { return true }, true},
-		{"MultiArgFunc", func(a, b int) bool { return a+b > 15 }, true},
+	testCases := []EvaluateConditionTestCase{
+		{Name: "BoolTrue", Condition: true, ExpectComplete: true},
+		{Name: "BoolFalse", Condition: false, ExpectComplete: false},
+		{Name: "StringValue", Condition: "condition", ExpectComplete: true},
+		{Name: "FuncReturnBool", Condition: func(n int) bool { return true }, ExpectComplete: true},
+		{Name: "FuncReturnBoolFalse", Condition: func(n int) bool { return false }, ExpectComplete: false},
+		{Name: "FuncReturnString", Condition: func(n int) string { return "condition" }, ExpectComplete: true},
+		{Name: "VariadicFunc", Condition: func(args ...int) bool { return true }, ExpectComplete: true},
+		{Name: "MultiArgFunc", Condition: func(a, b int) bool { return a+b > 15 }, ExpectComplete: true},
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			graph := NewGraph()
-
-			graph.AddNode("start", func() (int, int) { return 10, 20 })
-			graph.AddNode("step1", func(a, b int) int { return a + b })
-
-			graph.AddEdgeWithCondition("start", "step1", tc.condition)
-
-			err := graph.RunWithContext(context.Background())
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
-			}
-
-			status := graph.NodeStatus("step1")
-			if tc.expectComplete && status != NodeStatusCompleted {
-				t.Errorf("Expected step1 to be completed")
-			}
-			if !tc.expectComplete && status != NodeStatusPending {
-				t.Errorf("Expected step1 to be pending")
+		t.Run(tc.Name, func(t *testing.T) {
+			if err := tc.Run(); err != nil {
+				t.Errorf("Test case failed: %v", err)
 			}
 		})
 	}
@@ -619,50 +645,80 @@ func TestGraphWithNoOpNode(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	endStatus := graph.NodeStatus("end")
+	endStatus, _ := graph.NodeStatus("end")
 	if endStatus != NodeStatusCompleted {
 		t.Errorf("Expected end node to be completed")
 	}
 }
 
-func TestGraphWithComplexValueTypes(t *testing.T) {
+type ComplexValueTypesTestCase struct {
+	InitialValue   int
+	InitialStatus  string
+	ExpectedValue  int
+	ExpectedStatus string
+}
+
+func (tc *ComplexValueTypesTestCase) Run() error {
 	graph := NewGraph()
 
 	graph.AddNode("start", func() *TestData {
-		return &TestData{Value: 10, Status: "test"}
+		return &TestData{Value: tc.InitialValue, Status: tc.InitialStatus}
 	})
 
-	graph.AddNode("modify", func(d *TestData) *TestData {
+	graph.AddNode("modify", func(d *TestData) (*TestData, error) {
 		d.Value *= 2
 		d.Status = "modified"
-		return d
+		return d, nil
 	})
 
-	graph.AddNode("copy", func(d *TestData) TestData {
+	graph.AddNode("copy", func(d *TestData) (TestData, error) {
 		return TestData{
 			Value:  d.Value + 5,
 			Status: d.Status + "-copied",
-		}
+		}, nil
 	})
 
 	graph.AddEdge("start", "modify")
 	graph.AddEdge("modify", "copy")
 
-	err := graph.RunWithContext(context.Background())
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
+	if err := graph.RunWithContext(context.Background()); err != nil {
+		return fmt.Errorf("unexpected error: %w", err)
 	}
 
-	copyResult := graph.NodeResult("copy")
+	copyResult, _ := graph.NodeResult("copy")
 	if len(copyResult) != 1 {
-		t.Fatalf("Expected copy to have 1 result, got %d", len(copyResult))
+		return fmt.Errorf("expected copy to have 1 result, got %d", len(copyResult))
 	}
 	resultValue := copyResult[0].(TestData)
-	if resultValue.Value != 25 {
-		t.Errorf("Expected copy result to be 25, got %d", resultValue.Value)
+	if resultValue.Value != tc.ExpectedValue {
+		return fmt.Errorf("expected copy result to be %d, got %d", tc.ExpectedValue, resultValue.Value)
 	}
-	if resultValue.Status != "modified-copied" {
-		t.Errorf("Expected copy status to be 'modified-copied', got %q", resultValue.Status)
+	if resultValue.Status != tc.ExpectedStatus {
+		return fmt.Errorf("expected copy status to be %q, got %q", tc.ExpectedStatus, resultValue.Status)
+	}
+	return nil
+}
+
+func TestGraphWithComplexValueTypes(t *testing.T) {
+	testCases := []ComplexValueTypesTestCase{
+		{
+			InitialValue:   10,
+			InitialStatus:  "test",
+			ExpectedValue:  25,
+			ExpectedStatus: "modified-copied",
+		},
+		{
+			InitialValue:   20,
+			InitialStatus:  "data",
+			ExpectedValue:  45,
+			ExpectedStatus: "modified-copied",
+		},
+	}
+
+	for _, tc := range testCases {
+		if err := tc.Run(); err != nil {
+			t.Errorf("Test case failed: %v", err)
+		}
 	}
 }
 
@@ -694,7 +750,7 @@ func TestGraphWithMultipleInputs(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	combineResult := graph.NodeResult("combine")
+	combineResult, _ := graph.NodeResult("combine")
 	if len(combineResult) != 1 {
 		t.Fatalf("Expected combine to have 1 result, got %d", len(combineResult))
 	}
@@ -727,7 +783,7 @@ func TestGraphWithMultipleOutputs(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	combineResult := graph.NodeResult("combine")
+	combineResult, _ := graph.NodeResult("combine")
 	if len(combineResult) != 1 {
 		t.Fatalf("Expected combine to have 1 result, got %d", len(combineResult))
 	}
@@ -767,7 +823,7 @@ func TestGraphWithEdgeCondition(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	endResult := graph.NodeResult("end")
+	endResult, _ := graph.NodeResult("end")
 	if len(endResult) != 1 {
 		t.Fatalf("Expected end to have 1 result, got %d", len(endResult))
 	}
@@ -782,7 +838,7 @@ func TestGraphRunWithError(t *testing.T) {
 	graph.AddNode("start", func() int { return -1 })
 	graph.AddNode("error_step", func(n int) (int, error) {
 		if n < 0 {
-			return 0, &ChainError{Message: "negative number"}
+			return 0, &FlowError{Message: "negative number"}
 		}
 		return n, nil
 	})
@@ -815,7 +871,7 @@ func TestGraphRunWithMixedNodeTypes(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	result := graph.NodeResult("combine")
+	result, _ := graph.NodeResult("combine")
 	if len(result) != 1 || result[0].(int) != 50 {
 		t.Errorf("Expected [50], got: %v", result)
 	}
@@ -916,7 +972,7 @@ func TestGraphExecuteNode(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("step1")
+		result, _ := graph.NodeResult("step1")
 		if len(result) != 1 || result[0].(int) != 6 {
 			t.Errorf("Expected [6], got: %v", result)
 		}
@@ -935,7 +991,7 @@ func TestGraphExecuteNode(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("step1")
+		result, _ := graph.NodeResult("step1")
 		if len(result) != 1 || result[0].(string) != "hello: 10" {
 			t.Errorf("Expected [hello: 10], got: %v", result)
 		}
@@ -996,7 +1052,7 @@ func TestGraphBuildExecutionPlan(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("combine")
+		result, _ := graph.NodeResult("combine")
 		if len(result) != 1 || result[0].(int) != 30 {
 			t.Errorf("Expected [30], got: %v", result)
 		}
@@ -1018,7 +1074,7 @@ func TestGraphBuildExecutionPlan(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("combine")
+		result, _ := graph.NodeResult("combine")
 		if len(result) != 1 || result[0].(int) != 50 {
 			t.Errorf("Expected [50], got: %v", result)
 		}
@@ -1079,7 +1135,7 @@ func TestGraphExecuteGraphSequential(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("combine")
+		result, _ := graph.NodeResult("combine")
 		if len(result) != 1 || result[0].(int) != 30 {
 			t.Errorf("Expected [30], got: %v", result)
 		}
@@ -1099,7 +1155,7 @@ func TestGraphExecuteGraphSequential(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("combine")
+		result, _ := graph.NodeResult("combine")
 		if len(result) != 1 || result[0].(int) != 30 {
 			t.Errorf("Expected [30], got: %v", result)
 		}
@@ -1146,7 +1202,7 @@ func TestGraphNodeResult(t *testing.T) {
 		graph := NewGraph()
 		graph.AddNode("start", func() int { return 10 })
 
-		result := graph.NodeResult("start")
+		result, _ := graph.NodeResult("start")
 		if len(result) != 0 {
 			t.Errorf("Expected empty result, got: %v", result)
 		}
@@ -1163,14 +1219,14 @@ func TestGraphNodeResult(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("step1")
+		result, _ := graph.NodeResult("step1")
 		if len(result) != 1 || result[0].(int) != 20 {
 			t.Errorf("Expected [20], got: %v", result)
 		}
 
 		graph.ClearStatus()
 
-		result = graph.NodeResult("step1")
+		result, _ = graph.NodeResult("step1")
 		if len(result) != 0 {
 			t.Errorf("Expected empty result after clear, got: %v", result)
 		}
@@ -1180,7 +1236,10 @@ func TestGraphNodeResult(t *testing.T) {
 func TestGraphNodeQueryNotFound(t *testing.T) {
 	t.Run("Status", func(t *testing.T) {
 		graph := NewGraph()
-		status := graph.NodeStatus("nonexistent")
+		status, err := graph.NodeStatus("nonexistent")
+		if err == nil {
+			t.Errorf("Expected error for nonexistent node")
+		}
 		if status != NodeStatusPending {
 			t.Errorf("Expected pending status, got: %v", status)
 		}
@@ -1189,14 +1248,17 @@ func TestGraphNodeQueryNotFound(t *testing.T) {
 	t.Run("Error", func(t *testing.T) {
 		graph := NewGraph()
 		err := graph.NodeError("nonexistent")
-		if err != nil {
-			t.Errorf("Expected nil error, got: %v", err)
+		if err == nil {
+			t.Errorf("Expected error for nonexistent node")
 		}
 	})
 
 	t.Run("Result", func(t *testing.T) {
 		graph := NewGraph()
-		result := graph.NodeResult("nonexistent")
+		result, err := graph.NodeResult("nonexistent")
+		if err == nil {
+			t.Errorf("Expected error for nonexistent node")
+		}
 		if result != nil {
 			t.Errorf("Expected nil result, got: %v", result)
 		}
@@ -1396,31 +1458,23 @@ func assertError(t *testing.T, err error, msgAndArgs ...any) {
 	}
 }
 
-func assertEqual(t *testing.T, expected, actual any, msgAndArgs ...any) {
+func assertEqual(t *testing.T, expected, actual any) {
 	t.Helper()
 	if !reflect.DeepEqual(expected, actual) {
-		if len(msgAndArgs) > 0 {
-			t.Fatalf("%s: expected %v, got %v", msgAndArgs[0], expected, actual)
-		} else {
-			t.Fatalf("Expected %v, got %v", expected, actual)
-		}
+		t.Fatalf("Expected %v, got %v", expected, actual)
 	}
 }
 
-func assertContains(t *testing.T, s, substr string, msgAndArgs ...any) {
+func assertContains(t *testing.T, s, substr string) {
 	t.Helper()
 	if !strings.Contains(s, substr) {
-		if len(msgAndArgs) > 0 {
-			t.Fatalf("%s: expected %q to contain %q", msgAndArgs[0], s, substr)
-		} else {
-			t.Fatalf("Expected %q to contain %q", s, substr)
-		}
+		t.Fatalf("Expected %q to contain %q", s, substr)
 	}
 }
 
 func assertNodeStatus(t *testing.T, graph *Graph, nodeName string, expected NodeStatus) {
 	t.Helper()
-	actual := graph.NodeStatus(nodeName)
+	actual, _ := graph.NodeStatus(nodeName)
 	if actual != expected {
 		t.Fatalf("Expected node %q status to be %v, got %v", nodeName, expected, actual)
 	}
@@ -1428,7 +1482,7 @@ func assertNodeStatus(t *testing.T, graph *Graph, nodeName string, expected Node
 
 func assertNodeResult(t *testing.T, graph *Graph, nodeName string, expected any) {
 	t.Helper()
-	result := graph.NodeResult(nodeName)
+	result, _ := graph.NodeResult(nodeName)
 	if len(result) != 1 {
 		t.Fatalf("Expected node %q to have 1 result, got %d", nodeName, len(result))
 	}
@@ -1469,7 +1523,7 @@ func TestGraphAddLoop(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("end")
+		result, _ := graph.NodeResult("end")
 		if len(result) != 1 || result[0].(int) != 9 {
 			t.Errorf("Expected [9], got: %v", result)
 		}
@@ -1487,7 +1541,7 @@ func TestGraphAddLoop(t *testing.T) {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 
-		result := graph.NodeResult("loop")
+		result, _ := graph.NodeResult("loop")
 		if len(result) != 1 || result[0].(int) != 6 {
 			t.Errorf("Expected [6], got: %v", result)
 		}
@@ -1498,7 +1552,7 @@ func TestGraphAddLoop(t *testing.T) {
 		graph.AddNode("start", func() int { return 1 })
 		graph.AddNode("loop", func(n int) (int, error) {
 			if n > 3 {
-				return 0, &ChainError{Message: "loop error"}
+				return 0, &FlowError{Message: "loop error"}
 			}
 			return n + 1, nil
 		})
@@ -1516,53 +1570,40 @@ func TestGraphAddLoop(t *testing.T) {
 }
 
 func TestGraphAddBranch(t *testing.T) {
-	t.Run("BranchWithCondition", func(t *testing.T) {
-		graph := NewGraph()
-		graph.AddNode("start", func() int { return 15 })
-		graph.AddNode("large", func(n int) int { return n * 2 })
-		graph.AddNode("small", func(n int) int { return n * 3 })
-		graph.AddNode("end", func(n int) int { return n + 1 })
-		graph.AddBranchEdge("start", map[string]any{
-			"large": func(n int) bool { return n > 10 },
-			"small": func(n int) bool { return n <= 10 },
+	tests := []struct {
+		name     string
+		startVal int
+		expected int
+	}{
+		{"BranchWithCondition", 15, 31},
+		{"BranchWithSmallValue", 5, 16},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			graph := NewGraph()
+			graph.AddNode("start", func() int { return tc.startVal })
+			graph.AddNode("large", func(n int) int { return n * 2 })
+			graph.AddNode("small", func(n int) int { return n * 3 })
+			graph.AddNode("end", func(n int) int { return n + 1 })
+			graph.AddBranchEdge("start", map[string]any{
+				"large": func(n int) bool { return n > 10 },
+				"small": func(n int) bool { return n <= 10 },
+			})
+			graph.AddEdge("large", "end")
+			graph.AddEdge("small", "end")
+
+			err := graph.RunWithContext(context.Background())
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+
+			result, _ := graph.NodeResult("end")
+			if len(result) != 1 || result[0].(int) != tc.expected {
+				t.Errorf("Expected [%d], got: %v", tc.expected, result)
+			}
 		})
-		graph.AddEdge("large", "end")
-		graph.AddEdge("small", "end")
-
-		err := graph.RunWithContext(context.Background())
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		result := graph.NodeResult("end")
-		if len(result) != 1 || result[0].(int) != 31 {
-			t.Errorf("Expected [31], got: %v", result)
-		}
-	})
-
-	t.Run("BranchWithSmallValue", func(t *testing.T) {
-		graph := NewGraph()
-		graph.AddNode("start", func() int { return 5 })
-		graph.AddNode("large", func(n int) int { return n * 2 })
-		graph.AddNode("small", func(n int) int { return n * 3 })
-		graph.AddNode("end", func(n int) int { return n + 1 })
-		graph.AddBranchEdge("start", map[string]any{
-			"large": func(n int) bool { return n > 10 },
-			"small": func(n int) bool { return n <= 10 },
-		})
-		graph.AddEdge("large", "end")
-		graph.AddEdge("small", "end")
-
-		err := graph.RunWithContext(context.Background())
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		result := graph.NodeResult("end")
-		if len(result) != 1 || result[0].(int) != 16 {
-			t.Errorf("Expected [16], got: %v", result)
-		}
-	})
+	}
 }
 
 func TestGraphLoopParallel(t *testing.T) {
@@ -1579,7 +1620,7 @@ func TestGraphLoopParallel(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	result := graph.NodeResult("end")
+	result, _ := graph.NodeResult("end")
 	if len(result) != 1 || result[0].(int) != 9 {
 		t.Errorf("Expected [9], got: %v", result)
 	}

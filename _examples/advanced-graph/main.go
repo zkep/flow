@@ -169,21 +169,36 @@ func example3StatusMonitoring() {
 	g.AddEdge("step3", "end")
 
 	fmt.Println("   Node status before execution:")
-	fmt.Printf("   - start: %d\n", g.NodeStatus("start"))
-	fmt.Printf("   - step1: %d\n", g.NodeStatus("step1"))
-	fmt.Printf("   - step2: %d\n", g.NodeStatus("step2"))
-	fmt.Printf("   - step3: %d\n", g.NodeStatus("step3"))
-	fmt.Printf("   - end: %d\n", g.NodeStatus("end"))
+	startStatus, _ := g.NodeStatus("start")
+	step1Status, _ := g.NodeStatus("step1")
+	step2Status, _ := g.NodeStatus("step2")
+	step3Status, _ := g.NodeStatus("step3")
+	endStatus, _ := g.NodeStatus("end")
+	fmt.Printf("   - start: %d\n", startStatus)
+	fmt.Printf("   - step1: %d\n", step1Status)
+	fmt.Printf("   - step2: %d\n", step2Status)
+	fmt.Printf("   - step3: %d\n", step3Status)
+	fmt.Printf("   - end: %d\n", endStatus)
 
 	fmt.Println("\n   Executing graph...")
 	err := g.Run()
 
 	fmt.Println("\n   Node status after execution:")
-	fmt.Printf("   - start: %d, Result: %v\n", g.NodeStatus("start"), g.NodeResult("start"))
-	fmt.Printf("   - step1: %d, Result: %v\n", g.NodeStatus("step1"), g.NodeResult("step1"))
-	fmt.Printf("   - step2: %d, Result: %v\n", g.NodeStatus("step2"), g.NodeResult("step2"))
-	fmt.Printf("   - step3: %d, Result: %v\n", g.NodeStatus("step3"), g.NodeResult("step3"))
-	fmt.Printf("   - end: %d, Result: %v\n", g.NodeStatus("end"), g.NodeResult("end"))
+	startStatus, _ = g.NodeStatus("start")
+	startResult, _ := g.NodeResult("start")
+	step1Status, _ = g.NodeStatus("step1")
+	step1Result, _ := g.NodeResult("step1")
+	step2Status, _ = g.NodeStatus("step2")
+	step2Result, _ := g.NodeResult("step2")
+	step3Status, _ = g.NodeStatus("step3")
+	step3Result, _ := g.NodeResult("step3")
+	endStatus, _ = g.NodeStatus("end")
+	endResult, _ := g.NodeResult("end")
+	fmt.Printf("   - start: %d, Result: %v\n", startStatus, startResult)
+	fmt.Printf("   - step1: %d, Result: %v\n", step1Status, step1Result)
+	fmt.Printf("   - step2: %d, Result: %v\n", step2Status, step2Result)
+	fmt.Printf("   - step3: %d, Result: %v\n", step3Status, step3Result)
+	fmt.Printf("   - end: %d, Result: %v\n", endStatus, endResult)
 
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
@@ -384,7 +399,7 @@ func example6ETLProcess() {
 		return countInvalid > 0
 	}, 2)
 
-	graph.AddNode("transformData", func(data []map[string]interface{}) []map[string]interface{} {
+	graph.AddNode("transformData", func(countInvalid int, data []map[string]interface{}) []map[string]interface{} {
 		var transformed []map[string]interface{}
 		for _, item := range data {
 			price := item["price"].(int)
@@ -406,19 +421,13 @@ func example6ETLProcess() {
 		return "normal_value"
 	})
 
-	graph.AddNode("loadToWarehouse", func(data []map[string]interface{}) error {
-		fmt.Printf("Loading %d items to data warehouse\n", len(data))
-		for _, item := range data {
-			fmt.Printf("Loading: %v\n", item)
-		}
+	graph.AddNode("loadToWarehouse", func(category string) error {
+		fmt.Printf("Loading items to data warehouse (category: %s)\n", category)
 		return nil
 	})
 
-	graph.AddNode("loadToPremium", func(data []map[string]interface{}) error {
-		fmt.Printf("Loading %d high-value items to premium storage\n", len(data))
-		for _, item := range data {
-			fmt.Printf("Premium loading: %v\n", item)
-		}
+	graph.AddNode("loadToPremium", func(category string) error {
+		fmt.Printf("Loading items to premium storage (category: %s)\n", category)
 		return nil
 	})
 
