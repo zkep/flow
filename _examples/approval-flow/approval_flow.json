@@ -1,0 +1,100 @@
+{
+  "name": "Leave Approval Flow",
+  "description": "Employee leave approval workflow with multi-level approval support",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "Start Request",
+      "action": "init_request"
+    },
+    {
+      "id": "submit",
+      "type": "task",
+      "label": "Submit Application",
+      "action": "submit_application"
+    },
+    {
+      "id": "day_check",
+      "type": "condition",
+      "label": "Days Check",
+      "condition": "days > 3",
+      "true_edge": "manager_approval",
+      "false_edge": "team_leader_approval"
+    },
+    {
+      "id": "team_leader_approval",
+      "type": "task",
+      "label": "Team Leader Approval",
+      "action": "team_leader_approve"
+    },
+    {
+      "id": "manager_approval",
+      "type": "task",
+      "label": "Manager Approval",
+      "action": "manager_approve"
+    },
+    {
+      "id": "hr_review",
+      "type": "task",
+      "label": "HR Review",
+      "action": "hr_review"
+    },
+    {
+      "id": "approved",
+      "type": "end",
+      "label": "Approved",
+      "action": "notify_approved"
+    },
+    {
+      "id": "rejected",
+      "type": "end",
+      "label": "Rejected",
+      "action": "notify_rejected"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "submit"
+    },
+    {
+      "from": "submit",
+      "to": "day_check"
+    },
+    {
+      "from": "day_check",
+      "to": "team_leader_approval",
+      "condition": "days <= 3"
+    },
+    {
+      "from": "day_check",
+      "to": "manager_approval",
+      "condition": "days > 3"
+    },
+    {
+      "from": "team_leader_approval",
+      "to": "hr_review",
+      "condition": "approved == true"
+    },
+    {
+      "from": "team_leader_approval",
+      "to": "rejected",
+      "condition": "approved == false"
+    },
+    {
+      "from": "manager_approval",
+      "to": "hr_review",
+      "condition": "approved == true"
+    },
+    {
+      "from": "manager_approval",
+      "to": "rejected",
+      "condition": "approved == false"
+    },
+    {
+      "from": "hr_review",
+      "to": "approved"
+    }
+  ]
+}

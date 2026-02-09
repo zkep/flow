@@ -126,7 +126,7 @@ func example1SequentialExecution() {
 
 	fmt.Println("\n   Compare with sequential execution:")
 	g.ClearStatus()
-	err = g.RunSequential(context.Background())
+	err = g.RunSequentialWithContext(context.Background())
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	} else {
@@ -331,7 +331,7 @@ func example5CreditOnboarding() {
 	graph.AddEdge("sendApproval", "onboardingComplete")
 	graph.AddEdge("sendRejection", "onboardingFailed")
 	fmt.Println(graph.Mermaid())
-	if err := graph.Run(context.Background()); err != nil {
+	if err := graph.RunWithContext(context.Background()); err != nil {
 		fmt.Printf("Onboarding process failed: %v\n", err)
 	}
 }
@@ -433,7 +433,7 @@ func example6ETLProcess() {
 		"loadToPremium":   func(category string) bool { return category == "high_value" },
 	})
 	fmt.Println(graph.Mermaid())
-	if err := graph.Run(context.Background()); err != nil {
+	if err := graph.RunWithContext(context.Background()); err != nil {
 		fmt.Printf("ETL process failed: %v\n", err)
 	}
 }
@@ -513,7 +513,7 @@ func example7OrderProcessing() {
 	})
 	graph.AddEdge("shipOrder", "sendNotification")
 	fmt.Println(graph.Mermaid())
-	if err := graph.Run(context.Background()); err != nil {
+	if err := graph.RunWithContext(context.Background()); err != nil {
 		fmt.Printf("Order processing failed: %v\n", err)
 	}
 }

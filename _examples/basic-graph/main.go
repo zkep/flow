@@ -47,7 +47,7 @@ func example1SimpleFlow() {
 	g.AddEdge("process1", "process2")
 	g.AddEdge("process2", "end")
 
-	err := g.Run(context.Background())
+	err := g.RunWithContext(context.Background())
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	} else {
@@ -100,7 +100,7 @@ func example2NodeTypes() {
 	g.AddEdge("processB", "loop")
 	g.AddEdge("loop", "output")
 
-	err := g.Run(context.Background())
+	err := g.RunWithContext(context.Background())
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	}

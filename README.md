@@ -14,7 +14,6 @@ Flow is a powerful Go library for building and executing workflows, providing tw
 - **Automatic Parameter Handling**: Smart parameter passing and type conversion between tasks
 - **Error Handling**: Comprehensive error propagation and handling
 - **Visualization Support**: Generate Mermaid and Graphviz diagrams for workflow visualization
-- **Flexible Execution Strategies**: Choose between sequential and parallel execution
 
 ## Installation
 

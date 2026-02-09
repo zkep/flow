@@ -1049,15 +1049,14 @@ func TestChainStruct(t *testing.T) {
 	type Result3 struct {
 		Step3 float64
 	}
-	// 每一步都返回上一步的结果
-	chain.Add("step1", func() Result1 {
-		return Result1{Step1: 10}
+	chain.Add("step1", func() (Result1, error) {
+		return Result1{Step1: 10}, nil
 	})
-	chain.Add("step2", func(x Result1) (Result1, Result2) {
-		return x, Result2{Step2: "20"}
+	chain.Add("step2", func(x Result1) (Result1, Result2, error) {
+		return x, Result2{Step2: "20"}, nil
 	})
-	chain.Add("step3", func(x Result1, y Result2) (Result1, Result2, Result3) {
-		return x, y, Result3{Step3: 30}
+	chain.Add("step3", func(x Result1, y Result2) (Result1, Result2, Result3, error) {
+		return x, y, Result3{Step3: 30}, nil
 	})
 	err := chain.Run()
 	if err != nil {
